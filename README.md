@@ -1,1 +1,1 @@
-# hyprland-setup
+# archinstall script
