@@ -114,15 +114,18 @@ echo "-- Installing GRUB Bootloader --"
 echo "--------------------------------------"
 
 # Install GRUB
-pacman -S grub efibootmgr --noconfirm --needed
+pacman -S grub efibootmgr os-prober --noconfirm --needed
+
+# Enable OS Prober
+echo "Enabling OS Prober..."
+sed -i 's/^#GRUB_DISABLE_OS_PROBER=false/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub
 
 # Install GRUB to the EFI partition
 grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ArchLinux
 
-# Create the GRUB config
+# Create the GRUB config with OS Prober enabled
 grub-mkconfig -o /boot/grub/grub.cfg
 
-# Install additional drivers and services
 echo "--------------------------------------"
 echo "-- Installing Drivers & Packages --"
 echo "--------------------------------------"
