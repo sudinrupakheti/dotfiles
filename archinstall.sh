@@ -18,8 +18,8 @@ fi
 
 # Optimizing mirrorlist
 echo "Updating mirrorlist for faster downloads..."
-pacman -Sy reflector --noconfirm --needed
-reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+sudo pacman -Sy reflector --noconfirm --needed
+sudo reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
 # Format filesystems
 echo -e "\nCreating Filesystems...\n"
@@ -59,7 +59,10 @@ cat <<REALEND > /mnt/next.sh
 useradd -m sudin
 usermod -c "Sudin" sudin
 usermod -aG wheel,storage,power,audio,video sudin
-echo "sudin:password" | chpasswd
+
+echo "Enter password for user 'sudin':"
+read -s USER_PASS
+echo "sudin:\$USER_PASS" | chpasswd
 
 # Enable sudo for user
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
@@ -87,11 +90,50 @@ EOF
 
 # Setup ZRAM if selected
 if [[ "$ZRAM_ENABLE" == "y" ]]; then
-    echo "zram" > /etc/modules-load.d/zram.conf
-    echo "options zram num_devices=1" > /etc/modprobe.d/zram.conf
-    echo "KERNEL==\"zram0\", ATTR{disksize}=\"8G\", TAG+=\"systemd\"" > /etc/udev/rules.d/99-zram.rules
-    echo "/dev/zram0 none swap defaults 0 0" >> /etc/fstab
+    echo "--------------------------------------"
+    echo "-- Setting up ZRAM (systemd method) --"
+    echo "--------------------------------------"
+
+    # Install systemd-zram-generator
+    pacman -S systemd-zram-generator --noconfirm --needed
+
+    # Create config file
+    cat <<EOF > /etc/systemd/zram-generator.conf
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+EOF
+
+    # Enable ZRAM swap
+    systemctl enable systemd-zram-setup@zram0
+    systemctl start systemd-zram-setup@zram0
 fi
+
+echo "--------------------------------------"
+echo "-- Installing rEFInd Bootloader --"
+echo "--------------------------------------"
+
+# Install rEFInd
+pacman -S refind --noconfirm --needed
+
+# Install rEFInd to the EFI partition
+refind-install
+
+# Make sure the boot entry is properly set
+efibootmgr -c -d /dev/\$(lsblk -no pkname "$EFI") -p \$(lsblk -no partno "$EFI") -L "rEFInd" -l "\EFI\refind\refind_x64.efi"
+
+# Download and Apply Glassy Theme
+echo "--------------------------------------"
+echo "-- Applying rEFInd Glassy Theme --"
+echo "--------------------------------------"
+
+mkdir -p /boot/efi/EFI/refind/themes/glassy
+cd /boot/efi/EFI/refind/themes/glassy
+git clone --depth=1 https://github.com/Pr0cella/rEFInd-glassy.git .
+cd ~
+
+# Update rEFInd config to use the theme
+sed -i 's|^#include themes/theme.conf|include themes/glassy/theme.conf|' /boot/efi/EFI/refind/refind.conf
 
 echo "-------------------------------------------------"
 echo "Installing Drivers & Packages"
@@ -110,19 +152,12 @@ systemctl enable --now pipewire pipewire-pulse
 echo "-------------------------------------------------"
 echo "Installing yay (AUR Helper)"
 echo "-------------------------------------------------"
-git clone https://aur.archlinux.org/yay-bin.git /home/sudin/yay-bin
-chown -R sudin:sudin /home/sudin/yay-bin
-cd /home/sudin/yay-bin
-sudo -u sudin makepkg -si --noconfirm
-cd ~
-rm -rf /home/sudin/yay-bin
-
-echo "--------------------------------------"
-echo "-- Bootloader Installation  --"
-echo "--------------------------------------"
-pacman -S grub efibootmgr --noconfirm --needed
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ArchLinux
-grub-mkconfig -o /boot/grub/grub.cfg
+sudo -u sudin bash -c '
+    git clone https://aur.archlinux.org/yay-bin.git ~/yay-bin
+    cd ~/yay-bin
+    makepkg -si --noconfirm
+    rm -rf ~/yay-bin
+'
 
 echo "-------------------------------------------------"
 echo "Install Complete, You can reboot now"
