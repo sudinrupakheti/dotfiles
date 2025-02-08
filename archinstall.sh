@@ -110,45 +110,33 @@ EOF
 fi
 
 echo "--------------------------------------"
-echo "-- Installing rEFInd Bootloader --"
+echo "-- Installing GRUB Bootloader --"
 echo "--------------------------------------"
 
-# Install rEFInd
-pacman -S refind --noconfirm --needed
+# Install GRUB
+pacman -S grub efibootmgr --noconfirm --needed
 
-# Install rEFInd to the EFI partition
-refind-install
+# Install GRUB to the EFI partition
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ArchLinux
 
-# Make sure the boot entry is properly set
-efibootmgr -c -d /dev/\$(lsblk -no pkname "$EFI") -p \$(lsblk -no partno "$EFI") -L "rEFInd" -l "\EFI\refind\refind_x64.efi"
+# Create the GRUB config
+grub-mkconfig -o /boot/grub/grub.cfg
 
-# Download and Apply Glassy Theme
+# Install additional drivers and services
 echo "--------------------------------------"
-echo "-- Applying rEFInd Glassy Theme --"
+echo "-- Installing Drivers & Packages --"
 echo "--------------------------------------"
-
-mkdir -p /boot/efi/EFI/refind/themes/glassy
-cd /boot/efi/EFI/refind/themes/glassy
-git clone --depth=1 https://github.com/Pr0cella/rEFInd-glassy.git .
-cd ~
-
-# Update rEFInd config to use the theme
-sed -i 's|^#include themes/theme.conf|include themes/glassy/theme.conf|' /boot/efi/EFI/refind/refind.conf
-
-echo "-------------------------------------------------"
-echo "Installing Drivers & Packages"
-echo "-------------------------------------------------"
-# Install AMD CPU/mGPU, NVIDIA, and other necessary packages
-pacman -S mesa-utils vulkan-radeon libva-mesa-driver libva-utils \
-          nvidia nvidia-utils nvidia-settings nvidia-prime \
-          pipewire pipewire-alsa pipewire-pulse wireplumber pipewire-jack \
-          base-devel --noconfirm --needed
+# Install necessary services and packages
+pacman -S networkmanager bluez pipewire pipewire-alsa pipewire-pulse wireplumber --noconfirm --needed
 
 # Enable services
 systemctl enable NetworkManager
 systemctl enable bluetooth
 systemctl enable --now pipewire pipewire-pulse
 
+echo "Services installed and enabled successfully."
+
+# Install yay (AUR Helper)
 echo "-------------------------------------------------"
 echo "Installing yay (AUR Helper)"
 echo "-------------------------------------------------"
