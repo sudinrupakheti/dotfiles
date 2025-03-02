@@ -38,6 +38,8 @@ breaker
 
 while true; do
     echo -e "${YELLOW}Enter EFI partition:${RESET}"
+    echo -e "${GREEN}Note: If this is a Windows EFI partition (vfat), it will NOT be formatted.${RESET}"
+    echo -e "${RED}WARNING: Ensure this is the correct partition for dual-booting!${RESET}"
     read -r EFI
     [[ -b "$EFI" ]] && break
     echo -e "${RED}Invalid EFI partition. Try again.${RESET}"
@@ -76,6 +78,11 @@ else
     echo -e "${YELLOW}No NVIDIA GPU detected.${RESET}"
     NVIDIA_ENABLE="n"
 fi
+
+echo -e "${YELLOW}Choose bootloader (grub/systemd-boot):${RESET}"
+read -r BOOTLOADER
+BOOTLOADER=${BOOTLOADER,,} # Convert to lowercase
+[[ "$BOOTLOADER" != "grub" && "$BOOTLOADER" != "systemd-boot" ]] && BOOTLOADER="grub" # Default to grub if invalid
 
 echo -e "${YELLOW}Enter your username:${RESET}"
 read -r USERNAME
@@ -116,7 +123,11 @@ breaker
 echo -e "${GREEN}Mounting Partitions...${RESET}"
 mount "$ROOT" /mnt
 check_status "Root partition mounting"
-mount --mkdir "$EFI" /mnt/boot/efi
+if [[ "$BOOTLOADER" == "grub" ]]; then
+    mount --mkdir "$EFI" /mnt/boot/efi
+else  # systemd-boot
+    mount --mkdir "$EFI" /mnt/boot
+fi
 check_status "EFI partition mounting"
 [[ "$ZRAM_ENABLE" == "n" && -n "$SWAP" ]] && swapon "$SWAP"
 
@@ -129,6 +140,7 @@ echo -e "${GREEN}Installing Arch Linux Base System...${RESET}"
 BASE_PKGS="base base-devel linux linux-firmware linux-headers nano networkmanager sudo git amd-ucode"
 [[ "$FS_TYPE" == "btrfs" ]] && BASE_PKGS+=" btrfs-progs"
 [[ "$NVIDIA_ENABLE" == "y" ]] && BASE_PKGS+=" nvidia nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-prime"
+[[ "$BOOTLOADER" == "grub" ]] && BASE_PKGS+=" grub efibootmgr os-prober"
 pacstrap /mnt $BASE_PKGS --noconfirm --needed
 check_status "Base system installation"
 
@@ -175,14 +187,36 @@ if [[ "$ZRAM_ENABLE" == "y" ]]; then
     systemctl enable systemd-zram-setup@zram0
 fi
 
-# Bootloader with power optimization
-pacman -S grub efibootmgr os-prober --noconfirm --needed
-echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
-# Add power-saving kernel parameters
-echo 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash iommu=soft amdgpu.dc=0"' >> /etc/default/grub
-[[ "$NVIDIA_ENABLE" == "y" ]] && echo "nvidia-drm.modeset=1" >> /etc/default/grub
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ArchLinux
-grub-mkconfig -o /boot/grub/grub.cfg
+# Bootloader setup
+if [[ "$BOOTLOADER" == "grub" ]]; then
+    echo "Installing GRUB..."
+    echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+    echo 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash iommu=soft amdgpu.dc=0"' >> /etc/default/grub
+    [[ "$NVIDIA_ENABLE" == "y" ]] && echo "nvidia-drm.modeset=1" >> /etc/default/grub
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ArchLinux
+    grub-mkconfig -o /boot/grub/grub.cfg
+else  # systemd-boot
+    echo "Installing systemd-boot..."
+    bootctl --path=/boot install
+    mkdir -p /boot/loader/entries
+    cat <<ARCH > /boot/loader/entries/arch.conf
+title   Arch Linux
+linux   /vmlinuz-linux
+initrd  /amd-ucode.img
+initrd  /initramfs-linux.img
+options root=PARTUUID=$(blkid -s PARTUUID -o value "$ROOT") rw quiet splash iommu=soft amdgpu.dc=0
+[[ "$NVIDIA_ENABLE" == "y" ]] && echo "nvidia-drm.modeset=1" >> /boot/loader/entries/arch.conf
+ARCH
+    cat <<WIN > /boot/loader/entries/windows.conf
+title   Windows
+efi     /EFI/Microsoft/Boot/bootmgfw.efi
+WIN
+    cat <<LOADER > /boot/loader/loader.conf
+default arch.conf
+timeout 5
+editor  no
+LOADER
+fi
 
 # Install additional services and power management
 pacman -S networkmanager bluez pipewire pipewire-alsa pipewire-pulse wireplumber tlp --noconfirm --needed
