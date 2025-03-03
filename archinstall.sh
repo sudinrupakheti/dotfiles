@@ -99,7 +99,12 @@ fi
 echo -e "${YELLOW}Choose bootloader (grub/systemd-boot):${RESET}"
 read -r BOOTLOADER
 BOOTLOADER=${BOOTLOADER,,} # Convert to lowercase
-[[ "$BOOTLOADER" != "grub" && "$BOOTLOADER" != "systemd-boot" ]] && BOOTLOADER="grub" # Default to grub if invalid
+[[ "$BOOTLOADER" != "grub" && "$BOOTLOADER" != "systemd-boot" ]] && BOOTLOADER="systemd-boot" # Default to systemd-boot if invalid
+
+echo -e "${YELLOW}Choose desktop environment (gnome/kde/none):${RESET}"
+read -r DESKTOP
+DESKTOP=${DESKTOP,,} # Convert to lowercase
+[[ "$DESKTOP" != "gnome" && "$DESKTOP" != "kde" && "$DESKTOP" != "none" ]] && DESKTOP="none" # Default to none if invalid
 
 echo -e "${YELLOW}Enter your username:${RESET}"
 read -r USERNAME
@@ -128,10 +133,28 @@ check_status "Mirrorlist update"
 # Format Partitions
 breaker
 echo -e "${GREEN}Formatting Partitions...${RESET}"
-[[ "$(blkid -s TYPE -o value "$EFI")" != "vfat" ]] && mkfs.vfat -F32 "$EFI"
-check_status "EFI formatting"
+
+# Check EFI partition (no formatting, just validation)
+echo -e "${YELLOW}Checking EFI partition: $EFI${RESET}"
+if [[ -b "$EFI" ]]; then
+    CURRENT_TYPE=$(blkid -s TYPE -o value "$EFI")
+    echo -e "${YELLOW}Current filesystem type: ${CURRENT_TYPE:-none}${RESET}"
+    if [[ "$CURRENT_TYPE" != "vfat" ]]; then
+        echo -e "${RED}Error: EFI partition must be vfat for UEFI booting! Exiting...${RESET}"
+        exit 1
+    else
+        echo -e "${GREEN}EFI partition is vfat, proceeding without formatting...${RESET}"
+    fi
+else
+    echo -e "${RED}Error: $EFI is not a valid block device!${RESET}"
+    exit 1
+fi
+
+# Format Root partition
 mkfs."$FS_TYPE" -F "$ROOT"
 check_status "Root formatting"
+
+# Format Swap partition (if applicable)
 [[ "$ZRAM_ENABLE" == "n" && -n "$SWAP" ]] && mkswap "$SWAP"
 check_status "Swap formatting"
 
@@ -158,6 +181,8 @@ BASE_PKGS="base base-devel linux linux-firmware linux-headers nano networkmanage
 [[ "$FS_TYPE" == "btrfs" ]] && BASE_PKGS+=" btrfs-progs"
 [[ "$NVIDIA_ENABLE" == "y" ]] && BASE_PKGS+=" nvidia nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-prime"
 [[ "$BOOTLOADER" == "grub" ]] && BASE_PKGS+=" grub efibootmgr os-prober"
+[[ "$DESKTOP" == "gnome" ]] && BASE_PKGS+=" gnome gnome-shell gdm"
+[[ "$DESKTOP" == "kde" ]] && BASE_PKGS+=" plasma plasma-wayland-session sddm"
 pacstrap /mnt $BASE_PKGS --noconfirm --needed
 check_status "Base system installation"
 
@@ -239,6 +264,15 @@ fi
 pacman -S networkmanager bluez pipewire pipewire-alsa pipewire-pulse wireplumber tlp --noconfirm --needed
 [[ "$NVIDIA_ENABLE" == "y" ]] && pacman -S nvidia-prime --noconfirm --needed
 
+# Enable desktop environment services
+if [[ "$DESKTOP" == "gnome" ]]; then
+    systemctl enable gdm
+    echo "GNOME Wayland session will be used by default."
+elif [[ "$DESKTOP" == "kde" ]]; then
+    systemctl enable sddm
+    echo "KDE Plasma Wayland session will be used by default."
+fi
+
 # Enable services
 systemctl enable NetworkManager bluetooth pipewire pipewire-pulse tlp systemd-timesyncd
 
@@ -297,4 +331,7 @@ breaker
 echo -e "${GREEN}Installation complete! Type 'reboot' to start your new Arch Linux.${RESET}"
 [[ "$NVIDIA_ENABLE" == "y" ]] && echo -e "${YELLOW}Note: Use 'nvidia-run <application>' to run programs with NVIDIA GPU${RESET}"
 echo -e "${GREEN}AUR is ready with 'yay'. Install packages with 'yay -S <package>'${RESET}"
+[[ "$DESKTOP" == "gnome" ]] && echo -e "${GREEN}GNOME will start on reboot with GDM (Wayland).${RESET}"
+[[ "$DESKTOP" == "kde" ]] && echo -e "${GREEN}KDE Plasma will start on reboot with SDDM (Wayland).${RESET}"
+[[ "$DESKTOP" == "none" ]] && echo -e "${YELLOW}No desktop environment installed. You’ll boot to a TTY.${RESET}"
 breaker
