@@ -20,22 +20,39 @@ breaker() {
     echo -e "${BLUE}======================================${RESET}"
 }
 
-# Install figlet for fancy text if not present
-if ! command -v figlet &>/dev/null; then
-    pacman -Sy figlet --noconfirm --needed
-fi
-
 # Verify internet connection
 breaker
 echo -e "${BLUE}Checking internet connection...${RESET}"
 ping -c 3 archlinux.org &>/dev/null || { echo -e "${RED}No internet connection. Exiting...${RESET}"; exit 1; }
 
-# User Input with Validation
+# ASCII Art for Arch Linux Logo and Welcome Message
 breaker
-figlet -f slant "WELCOME TO ARCH INSTALL"
+cat << "EOF"
+                   -`
+                 .o+`
+                `ooo/
+               `+oooo:
+              `+oooooo:
+              -+oooooo+:
+            `/:-:++oooo+:
+           `/++++/+++++++:
+          `/++++++++++++++:
+         `/+++ooooooooooooo/`
+        ./ooosssso++osssssso+`
+       .oossssso-````/ossssss+`
+      -osssssso.      :ssssssso.
+     :osssssss/        osssso+++.
+    /ossssssss/        +ssssooo/-
+  `/ossssso+/:-        -:/+osssso+-
+ `+sso+:-`                 `.-/+oso:
+`++:.                           `-/+/
+.`                                 `
+    Welcome to Arch Install!
+EOF
 echo -e "${GREEN}Let’s set up your Arch Linux system!${RESET}"
 breaker
 
+# User Input with Validation
 while true; do
     echo -e "${YELLOW}Enter EFI partition:${RESET}"
     echo -e "${GREEN}Note: If this is a Windows EFI partition (vfat), it will NOT be formatted.${RESET}"
