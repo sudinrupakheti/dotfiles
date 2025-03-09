@@ -54,7 +54,6 @@ cat << "EOF"
          ___/  \___          
 ╭───────────────────────────────╮
 │     MINIMAL INSTALLATION      │
-│     SCRIPT WITH BTRFS         │
 ╰───────────────────────────────╯
 EOF
 echo -e "${GREEN}${BOLD}Let's set up your Arch Linux system!${RESET}"
