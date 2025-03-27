@@ -70,21 +70,22 @@ breaker
 # Partition selection function
 select_partition() {
     local prompt="$1"
-    echo -e "\n${CYAN}${BOLD}=== Current Disk Layout ===${RESET}"
-    lsblk -o NAME,SIZE,FSTYPE
-    echo -e "${CYAN}${BOLD}=========================${RESET}\n"
-    
     local partitions=($(lsblk -ln -o NAME,TYPE | grep 'part' | awk '{print "/dev/"$1}'))
     if [ ${#partitions[@]} -eq 0 ]; then
         echo -e "${RED}${BOLD}No partitions found! Exiting...${RESET}"
         exit 1
     fi
+
+    echo -e "\n${CYAN}${BOLD}=== Available Partitions ===${RESET}"
+    lsblk -o NAME,SIZE,FSTYPE
+    echo -e "${CYAN}${BOLD}===========================${RESET}"
     echo -e "${YELLOW}${BOLD}$prompt${RESET}"
     for i in "${!partitions[@]}"; do
         local size=$(lsblk -n -o SIZE "${partitions[$i]}")
         local fstype=$(lsblk -n -o FSTYPE "${partitions[$i]}")
         echo -e "${BLUE}$((i+1)). ${partitions[$i]} (${CYAN}Size: $size${BLUE}, ${CYAN}Type: ${fstype:-None}${BLUE})${RESET}"
     done
+
     while true; do
         read -p "Enter number (1-${#partitions[@]}): " choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#partitions[@]}" ]; then
@@ -98,22 +99,25 @@ select_partition() {
 # Partition setup
 breaker
 echo -e "${GREEN}${BOLD}Partition Setup:${RESET}"
-echo -e "${YELLOW}EFI Partition Choice:${RESET}"
-read -p "Use existing EFI or create new? (e/n): " EFI_CHOICE
+
+# EFI Partition
+echo -e "${YELLOW}EFI Partition Setup:${RESET}"
+read -p "Use existing EFI partition or create a new one? (e/n): " EFI_CHOICE
 if [[ "$EFI_CHOICE" == "e" || "$EFI_CHOICE" == "E" ]]; then
-    EFI=$(select_partition "Select existing EFI partition:")
+    EFI=$(select_partition "Select your existing EFI partition:")
     echo -e "${GREEN}✓ Using existing EFI: $EFI${RESET}"
 else
-    EFI=$(select_partition "Select partition for new EFI:")
+    EFI=$(select_partition "Select partition to format as new EFI:")
     echo -e "${YELLOW}Formatting $EFI as vfat...${RESET}"
     (mkfs.vfat -F32 "$EFI") & spinner $!
     check_status "EFI formatting"
 fi
 
-echo -e "${YELLOW}Swap Partition Choice:${RESET}"
-read -p "Do you want a swap partition? (y/n): " SWAP_CHOICE
+# Swap Partition
+echo -e "${YELLOW}Swap Partition Setup:${RESET}"
+read -p "Do you want to set up a swap partition? (y/n): " SWAP_CHOICE
 if [[ "$SWAP_CHOICE" == "y" || "$SWAP_CHOICE" == "Y" ]]; then
-    SWAP=$(select_partition "Select swap partition:")
+    SWAP=$(select_partition "Select partition for swap:")
     echo -e "${YELLOW}Formatting $SWAP as swap...${RESET}"
     (mkswap "$SWAP") & spinner $!
     check_status "Swap formatting"
@@ -121,11 +125,13 @@ if [[ "$SWAP_CHOICE" == "y" || "$SWAP_CHOICE" == "Y" ]]; then
     check_status "Swap activation"
     SWAP_ENABLED=true
 else
-    echo -e "${YELLOW}No swap partition selected (ZRAM will be used).${RESET}"
+    echo -e "${GREEN}✓ No swap partition selected (ZRAM will be used instead).${RESET}"
     SWAP_ENABLED=false
 fi
 
-ROOT=$(select_partition "Select root partition:")
+# Root Partition
+echo -e "${YELLOW}Root Partition Setup:${RESET}"
+ROOT=$(select_partition "Select partition for root filesystem:")
 echo -e "${YELLOW}Formatting $ROOT as ext4...${RESET}"
 (mkfs.ext4 -F "$ROOT") & spinner $!
 check_status "Root formatting"
@@ -208,7 +214,7 @@ RED='\e[31m'
 BOLD='\e[1m'
 RESET='\e[0m'
 
-echo -e "\${GREEN}\${BOLD}Post-Installation Setup...\${RESET}"
+echo -e "\${GREEN}\${BOLD}PostWESTInstallation Setup...\${RESET}"
 
 # User setup
 useradd -m "$USERNAME"
