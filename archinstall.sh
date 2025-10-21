@@ -176,67 +176,60 @@ EOF
     handle_skip_to
     
     # WiFi setup
-    if [[ $INSTALL_WIFI =~ ^[Yy]$ ]]; then
-        step_header "NETWORK SETUP"
-    if skip_if_done "WIFI_SETUP" "WiFi configuration"; then
-        :
+    step_header "NETWORK SETUP"
+
+if skip_if_done "WIFI_SETUP" "WiFi configuration"; then
+    :
+else
+    # Check for VM (skip WiFi if VM)
+    IS_VM=false
+    if grep -qE "(VMware|VirtualBox|KVM|QEMU)" /sys/class/dmi/id/product_name 2>/dev/null; then
+        IS_VM=true
+    fi
+
+    # Try to detect any WiFi adapter
+    WIFI_ADAPTER=$(iwctl device list 2>/dev/null | grep -oP '^\w+' || true)
+
+    if [[ "$IS_VM" == true ]] || [[ -z "$WIFI_ADAPTER" ]]; then
+        echo "⚠ No WiFi adapter found or running in a VM - skipping WiFi setup"
+        # Check internet
+        if ping -c 1 8.8.8.8 &> /dev/null; then
+            echo "✓ Internet connection detected"
+            save_state "WIFI_SETUP"
+        else
+            echo "✗ No internet connection. Please configure network manually."
+            read -p "Press Enter to continue or Ctrl+C to exit..."
+        fi
     else
-        echo "Setting up network connection..."
-        WIFI_CONNECTED=false
-        if iwctl device list | grep -q wlan; then
-            echo "WiFi adapter detected. Available networks:"
-            iwctl station wlan0 scan
-            sleep 3
-            iwctl station wlan0 get-networks
-            echo
-            read -p "Enter WiFi network name (SSID): " wifi_ssid
-            read -s -p "Enter WiFi password: " wifi_password
-            echo
-            
-            echo "Connecting to $wifi_ssid..."
-            iwctl --passphrase="$wifi_password" station wlan0 connect "$wifi_ssid"
-            
-            # Wait a moment for connection
-            sleep 5
-            
-            # Test internet connection
-            if ping -c 1 archlinux.org &> /dev/null; then
-                echo "✓ Internet connection established"
-                WIFI_CONNECTED=true
-                
-                # Save WiFi credentials for post-install
-                mkdir -p /tmp/wifi-backup
-                cat > /tmp/wifi-backup/wifi-credentials <<EOF
+        # Real WiFi adapter present - proceed with setup
+        echo "WiFi adapter detected: $WIFI_ADAPTER"
+        iwctl station "$WIFI_ADAPTER" scan
+        sleep 3
+        iwctl station "$WIFI_ADAPTER" get-networks
+        echo
+        read -p "Enter WiFi network name (SSID): " wifi_ssid
+        read -s -p "Enter WiFi password: " wifi_password
+        echo
+
+        echo "Connecting to $wifi_ssid..."
+        iwctl --passphrase="$wifi_password" station "$WIFI_ADAPTER" connect "$wifi_ssid"
+        sleep 5
+
+        if ping -c 1 8.8.8.8 &> /dev/null; then
+            echo "✓ Internet connection established"
+            mkdir -p /tmp/wifi-backup
+            cat > /tmp/wifi-backup/wifi-credentials <<EOF
 WIFI_SSID="$wifi_ssid"
 WIFI_PASSWORD="$wifi_password"
 EOF
-                echo "✓ WiFi credentials saved for post-install setup"
-                
-                save_state "WIFI_SETUP"
-            else
-                echo "✗ Failed to connect to internet. Continuing anyway..."
-                echo "You may need to manually configure network connection."
-            fi
+            echo "✓ WiFi credentials saved for post-install setup"
+            save_state "WIFI_SETUP"
         else
-            echo "No WiFi adapter found or ethernet already connected"
-            if ping -c 1 archlinux.org &> /dev/null; then
-                echo "✓ Internet connection detected"
-                save_state "WIFI_SETUP"
-            else
-                echo "✗ No internet connection. Please configure network manually."
-                read -p "Press Enter to continue or Ctrl+C to exit..."
-            fi
-        fi
-    else
-        echo "Skipping WiFi setup"
-        # Still need to check internet connection
-        if ping -c 1 archlinux.org &> /dev/null; then
-            echo "✓ Internet connection detected"
-        else
-            echo "⚠ No internet connection detected"
-            read -p "Press Enter to continue or Ctrl+C to exit..."
+            echo "✗ Failed to connect to internet. Continuing anyway..."
         fi
     fi
+fi
+
     
     # Partition selection
     step_header "PARTITION SELECTION"
