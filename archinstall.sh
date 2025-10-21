@@ -1,325 +1,961 @@
-#!/usr/bin/env bash
+#!/bin/bash
+set -euo pipefail
 
-# Colors for UI
-GREEN='\e[32m'
-YELLOW='\e[33m'
-BLUE='\e[34m'
-RED='\e[31m'
-CYAN='\e[36m'
-BOLD='\e[1m'
-RESET='\e[0m'
+SCRIPT_PHASE="${1:-install}"
+STATE_FILE="/tmp/arch-install-state"
+SKIP_TO="${2:-}"
+INSTALL_LOG="/tmp/arch-install-$(date +%Y%m%d-%H%M%S).log"
 
-# Function to check command status
-check_status() {
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}${BOLD}Error: $1 failed!${RESET}"
-        exit 1
-    else
-        echo -e "${GREEN}✓ $1 completed successfully${RESET}"
+# Logging function
+log_command() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$INSTALL_LOG"
+    "$@" 2>&1 | tee -a "$INSTALL_LOG"
+    return ${PIPESTATUS[0]}
+}
+
+echo "Installation log: $INSTALL_LOG" | tee -a "$INSTALL_LOG"
+
+# State management functions
+save_state() {
+    echo "$1=true" >> "$STATE_FILE"
+}
+
+check_state() {
+    [[ -f "$STATE_FILE" ]] && grep -q "^$1=true$" "$STATE_FILE" 2>/dev/null
+}
+
+step_header() {
+    echo
+    echo "============================================"
+    echo "STEP: $1"
+    echo "============================================"
+}
+
+skip_if_done() {
+    local step_name="$1"
+    local description="$2"
+    
+    if check_state "$step_name"; then
+        echo "✓ $description already completed - SKIPPING"
+        return 0
     fi
+    return 1
 }
 
-# Spinner for long operations
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='|/-\'
-    while [ "$(ps a | awk '{print $1}' | grep -w $pid)" ]; do
-        local temp=${spinstr#?}
-        printf "${CYAN} [%c]  ${RESET}" "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
-}
-
-# Breaker line
-breaker() {
-    echo -e "${BLUE}══════════════════════════════════════════════════════════════${RESET}"
-}
-
-# Welcome message with your ASCII logo
-clear
-breaker
-cat << "EOF"
-                    -`
-                  .o+`
-                 `ooo/
-                `+oooo:
-               `+oooooo:
-               -+oooooo+:
-             `/:-:++oooo+:
-            `/++++/+++++++:
-           `/++++++++++++++:
-          `/+++ooooooooooooo/`
-         ./ooosssso++osssssso+`
-        .oossssso-````/ossssss+`
-       -osssssso.      :ssssssso.
-      :osssssss/        osssso+++.
-     /ossssssss/        +ssssooo/-
-   `/ossssso+/:-        -:/+osssso+-
-  `+sso+:-`                 `.-/+oso:
- `++:.                           `-/+/
- .`                                 `
-   ARCH LINUX INSTALL
-EOF
-echo -e "${GREEN}${BOLD}Minimal Arch Setup - Let's Begin!${RESET}"
-breaker
-
-# Partition selection function
-select_partition() {
-    local prompt="$1"
-    local partitions=($(lsblk -ln -o NAME,TYPE | grep 'part' | awk '{print "/dev/"$1}'))
-    if [ ${#partitions[@]} -eq 0 ]; then
-        echo -e "${RED}${BOLD}No partitions found! Exiting...${RESET}"
-        exit 1
-    fi
-
-    echo -e "\n${CYAN}${BOLD}=== Available Partitions ===${RESET}"
-    lsblk -o NAME,SIZE,FSTYPE
-    echo -e "${CYAN}${BOLD}===========================${RESET}"
-    echo -e "${YELLOW}${BOLD}$prompt${RESET}"
-    for i in "${!partitions[@]}"; do
-        local size=$(lsblk -n -o SIZE "${partitions[$i]}")
-        local fstype=$(lsblk -n -o FSTYPE "${partitions[$i]}")
-        echo -e "${BLUE}$((i+1)). ${partitions[$i]} (${CYAN}Size: $size${BLUE}, ${CYAN}Type: ${fstype:-None}${BLUE})${RESET}"
-    done
-
-    while true; do
-        read -p "Enter number (1-${#partitions[@]}): " choice
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#partitions[@]}" ]; then
-            echo "${partitions[$((choice-1))]}"
-            return
+# Resume detection
+detect_resume() {
+    if [[ -f "$STATE_FILE" && -z "$SKIP_TO" ]]; then
+        echo "Previous installation state detected!"
+        echo "Completed steps:"
+        cat "$STATE_FILE" | sed 's/=true/ ✓/' | sed 's/^/  - /'
+        echo
+        read -p "Resume from where you left off? (y/N): " resume
+        if [[ ! $resume =~ ^[Yy]$ ]]; then
+            echo "Starting fresh installation..."
+            rm -f "$STATE_FILE"
         fi
-        echo -e "${RED}Invalid choice. Try again.${RESET}"
-    done
+    fi
 }
 
-# Partition setup
-breaker
-echo -e "${GREEN}${BOLD}Partition Setup:${RESET}"
-
-# EFI Partition
-echo -e "${YELLOW}EFI Partition Setup:${RESET}"
-read -p "Use existing EFI partition or create a new one? (e/n): " EFI_CHOICE
-if [[ "$EFI_CHOICE" == "e" || "$EFI_CHOICE" == "E" ]]; then
-    EFI=$(select_partition "Select your existing EFI partition:")
-    echo -e "${GREEN}✓ Using existing EFI: $EFI${RESET}"
-else
-    EFI=$(select_partition "Select partition to format as new EFI:")
-    echo -e "${YELLOW}Formatting $EFI as vfat...${RESET}"
-    (mkfs.vfat -F32 "$EFI") & spinner $!
-    check_status "EFI formatting"
-fi
-
-# Swap Partition
-echo -e "${YELLOW}Swap Partition Setup:${RESET}"
-read -p "Do you want to set up a swap partition? (y/n): " SWAP_CHOICE
-if [[ "$SWAP_CHOICE" == "y" || "$SWAP_CHOICE" == "Y" ]]; then
-    SWAP=$(select_partition "Select partition for swap:")
-    echo -e "${YELLOW}Formatting $SWAP as swap...${RESET}"
-    (mkswap "$SWAP") & spinner $!
-    check_status "Swap formatting"
-    swapon "$SWAP"
-    check_status "Swap activation"
-    SWAP_ENABLED=true
-else
-    echo -e "${GREEN}✓ No swap partition selected (ZRAM will be used instead).${RESET}"
-    SWAP_ENABLED=false
-fi
-
-# Root Partition
-echo -e "${YELLOW}Root Partition Setup:${RESET}"
-ROOT=$(select_partition "Select partition for root filesystem:")
-echo -e "${YELLOW}Formatting $ROOT as ext4...${RESET}"
-(mkfs.ext4 -F "$ROOT") & spinner $!
-check_status "Root formatting"
-
-# Mount partitions
-breaker
-echo -e "${GREEN}${BOLD}Mounting Partitions:${RESET}"
-mount "$ROOT" /mnt
-check_status "Root mounting"
-mkdir -p /mnt/boot/efi
-mount "$EFI" /mnt/boot/efi
-check_status "EFI mounting"
-
-# Mirror update and pacman config
-breaker
-echo -e "${GREEN}${BOLD}Updating Mirrors and Configuring Pacman:${RESET}"
-(pacman -Sy reflector --noconfirm) & spinner $!
-check_status "Reflector installation"
-(reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist) & spinner $!
-check_status "Mirrorlist update"
-sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 10/' /etc/pacman.conf
-check_status "Pacman parallel downloads enabled"
-echo -e "${YELLOW}Setting up progress bar for pacman...${RESET}"
-echo "XferCommand = /usr/bin/axel -n 16 -o %o %u" >> /etc/pacman.conf
-check_status "Pacman progress bar setup"
-
-# Package installation
-breaker
-echo -e "${GREEN}${BOLD}Installing Base System:${RESET}"
-BASE_PKGS="base base-devel linux linux-firmware grub efibootmgr networkmanager os-prober git nano bluez pipewire pipewire-alsa pipewire-pulse pipewire-jack amd-ucode mesa bash-completion btop sudo timeshift zram-generator fastfetch wget curl zip unzip tar tlp cpufrequtils axel"
-echo -e "${YELLOW}NVIDIA Driver Option:${RESET}"
-read -p "Install NVIDIA driver? (y/n): " NVIDIA_CHOICE
-if [[ "$NVIDIA_CHOICE" == "y" || "$NVIDIA_CHOICE" == "Y" ]]; then
-    BASE_PKGS="$BASE_PKGS nvidia nvidia-utils"
-fi
-(pacstrap /mnt $BASE_PKGS --noconfirm) & pid=$!
-spinner $pid
-check_status "Base system installation"
-
-# Generate fstab
-breaker
-echo -e "${GREEN}${BOLD}Generating fstab:${RESET}"
-(genfstab -U /mnt >> /mnt/etc/fstab) & spinner $!
-check_status "Fstab generation"
-
-# User configuration
-breaker
-echo -e "${GREEN}${BOLD}User Configuration:${RESET}"
-while true; do
-    read -p "${YELLOW}Enter username:${RESET} " USERNAME
-    if [[ -n "$USERNAME" && "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-        break
+# Skip to specific step
+handle_skip_to() {
+    if [[ -n "$SKIP_TO" ]]; then
+        echo "Skipping to step: $SKIP_TO"
+        # Create minimal state file to skip earlier steps
+        case "$SKIP_TO" in
+            "partitioning") ;;
+            "mounting") save_state "PARTITIONING" ;;
+            "mirrors") save_state "PARTITIONING"; save_state "MOUNTING" ;;
+            "pacstrap") save_state "PARTITIONING"; save_state "MOUNTING"; save_state "MIRRORS" ;;
+            "fstab") save_state "PARTITIONING"; save_state "MOUNTING"; save_state "MIRRORS"; save_state "PACSTRAP" ;;
+            "zram") save_state "PARTITIONING"; save_state "MOUNTING"; save_state "MIRRORS"; save_state "PACSTRAP"; save_state "FSTAB" ;;
+            "chroot") save_state "PARTITIONING"; save_state "MOUNTING"; save_state "MIRRORS"; save_state "PACSTRAP"; save_state "FSTAB"; save_state "ZRAM" ;;
+            *) echo "Unknown step: $SKIP_TO"; exit 1 ;;
+        esac
     fi
-    echo -e "${RED}Invalid username! Use lowercase, numbers, underscores, hyphens.${RESET}"
-done
-echo -e "${YELLOW}Enter password for $USERNAME:${RESET}"
-read -s USER_PASS
-echo -e "\n${YELLOW}Confirm password:${RESET}"
-read -s USER_PASS_CONFIRM
-[[ "$USER_PASS" != "$USER_PASS_CONFIRM" ]] && { echo -e "${RED}${BOLD}Passwords do not match! Exiting...${RESET}"; exit 1; }
+}
 
-echo -e "${YELLOW}Enter root password:${RESET}"
-read -s ROOT_PASS
-echo -e "\n${YELLOW}Confirm password:${RESET}"
-read -s ROOT_PASS_CONFIRM
-[[ "$ROOT_PASS" != "$ROOT_PASS_CONFIRM" ]] && { echo -e "${RED}${BOLD}Passwords do not match! Exiting...${RESET}"; exit 1; }
-
-echo -e "${YELLOW}Enter hostname (default: archlinux):${RESET}"
-read -r HOSTNAME
-HOSTNAME=${HOSTNAME:-archlinux}
-
-# Post-installation script
-breaker
-echo -e "${GREEN}${BOLD}Configuring System:${RESET}"
-cat <<EOF > /mnt/root/post-install.sh
-#!/usr/bin/env bash
-GREEN='\e[32m'
-YELLOW='\e[33m'
-RED='\e[31m'
-BOLD='\e[1m'
-RESET='\e[0m'
-
-echo -e "\${GREEN}\${BOLD}PostWESTInstallation Setup...\${RESET}"
-
-# User setup
-useradd -m "$USERNAME"
-echo "$USERNAME:$USER_PASS" | chpasswd
-usermod -aG wheel "$USERNAME"
-echo "root:$ROOT_PASS" | chpasswd
-
-# Sudo config
-echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
-echo "Defaults pwfeedback" >> /etc/sudoers
-
-# Locale and timezone
-sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-locale-gen
-echo "LANG=en_US.UTF-8" > /etc/locale.conf
-ln -sf /usr/share/zoneinfo/Asia/Kathmandu /etc/localtime
-hwclock --systohc
-timedatectl set-ntp true
-systemctl enable --now systemd-timesyncd
-
-# Hostname
-echo "$HOSTNAME" > /etc/hostname
-cat <<HOSTS > /etc/hosts
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain   $HOSTNAME
-HOSTS
-
-# Bootloader
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --recheck
-if [ "$SWAP_ENABLED" = true ]; then
-    SWAP_UUID=\$(blkid -s UUID -o value "$SWAP")
-    sed -i '/^GRUB_CMDLINE_LINUX_DEFAULT/ s/"$/ resume=UUID=\$SWAP_UUID"/' /etc/default/grub
-fi
-grub-mkconfig -o /boot/grub/grub.cfg
-
-# Initramfs
-if [ "$SWAP_ENABLED" = true ]; then
-    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems fsck resume)/' /etc/mkinitcpio.conf
-else
-    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems fsck)/' /etc/mkinitcpio.conf
-fi
-mkinitcpio -P
-
-# ZRAM setup
-cat <<ZRAM > /etc/systemd/zram-generator.conf
+if [[ "$SCRIPT_PHASE" == "install" ]]; then
+    echo "=== ARCH LINUX ULTIMATE INSTALLATION SCRIPT ==="
+    echo
+    
+    # Ask about optional components
+    echo "This script can install optional components for a full desktop experience."
+    echo "You can skip all optional components for a minimal installation (useful for VMs/testing)."
+    echo
+    read -p "Skip ALL optional components? (y/N): " skip_all_optional
+    echo
+    
+    # Set defaults based on skip_all choice
+    if [[ $skip_all_optional =~ ^[Yy]$ ]]; then
+        INSTALL_WIFI="n"
+        INSTALL_ZRAM="n"
+        INSTALL_PIPEWIRE="n"
+        INSTALL_ZSH="n"
+        INSTALL_MONITORING="n"
+        INSTALL_TIMESHIFT="n"
+        INSTALL_FONTS="n"
+        INSTALL_TLP="n"
+        INSTALL_BLUETOOTH="n"
+        INSTALL_CPUPOWER="n"
+        INSTALL_SYSCTL="n"
+        INSTALL_KERNEL_OPTS="n"
+        INSTALL_OMZ="n"
+        INSTALL_GRAPHICS="n"
+        INSTALL_FIREWALL="n"
+        echo "✓ Minimal installation mode - all optional components will be skipped"
+    else
+        # Ask individually for each component
+        read -p "Configure WiFi during installation? (Y/n): " INSTALL_WIFI
+        INSTALL_WIFI=${INSTALL_WIFI:-y}
+        
+        read -p "Install ZRAM (8GB compressed swap)? (Y/n): " INSTALL_ZRAM
+        INSTALL_ZRAM=${INSTALL_ZRAM:-y}
+        
+        read -p "Install PipeWire audio system? (Y/n): " INSTALL_PIPEWIRE
+        INSTALL_PIPEWIRE=${INSTALL_PIPEWIRE:-y}
+        
+        read -p "Use Zsh shell instead of bash? (Y/n): " INSTALL_ZSH
+        INSTALL_ZSH=${INSTALL_ZSH:-y}
+        
+        read -p "Install system monitoring tools (htop, btop)? (Y/n): " INSTALL_MONITORING
+        INSTALL_MONITORING=${INSTALL_MONITORING:-y}
+        
+        read -p "Install Timeshift for system snapshots? (Y/n): " INSTALL_TIMESHIFT
+        INSTALL_TIMESHIFT=${INSTALL_TIMESHIFT:-y}
+        
+        read -p "Install additional fonts? (Y/n): " INSTALL_FONTS
+        INSTALL_FONTS=${INSTALL_FONTS:-y}
+        
+        read -p "Install TLP power management? (Y/n): " INSTALL_TLP
+        INSTALL_TLP=${INSTALL_TLP:-y}
+        
+        read -p "Install Bluetooth support? (Y/n): " INSTALL_BLUETOOTH
+        INSTALL_BLUETOOTH=${INSTALL_BLUETOOTH:-y}
+        
+        read -p "Install CPU performance governor? (Y/n): " INSTALL_CPUPOWER
+        INSTALL_CPUPOWER=${INSTALL_CPUPOWER:-y}
+        
+        read -p "Apply system optimizations (sysctl tweaks)? (Y/n): " INSTALL_SYSCTL
+        INSTALL_SYSCTL=${INSTALL_SYSCTL:-y}
+        
+        read -p "Apply kernel optimizations in post-install? (Y/n): " INSTALL_KERNEL_OPTS
+        INSTALL_KERNEL_OPTS=${INSTALL_KERNEL_OPTS:-y}
+        
+        read -p "Install Oh My Zsh with Powerlevel10k theme? (Y/n): " INSTALL_OMZ
+        INSTALL_OMZ=${INSTALL_OMZ:-y}
+        
+        read -p "Prompt for graphics drivers in post-install? (Y/n): " INSTALL_GRAPHICS
+        INSTALL_GRAPHICS=${INSTALL_GRAPHICS:-y}
+        
+        read -p "Enable UFW firewall? (Y/n): " INSTALL_FIREWALL
+        INSTALL_FIREWALL=${INSTALL_FIREWALL:-y}
+    fi
+    
+    # Save installation preferences
+    cat > /tmp/install-preferences <<EOF
+INSTALL_WIFI="$INSTALL_WIFI"
+INSTALL_ZRAM="$INSTALL_ZRAM"
+INSTALL_PIPEWIRE="$INSTALL_PIPEWIRE"
+INSTALL_ZSH="$INSTALL_ZSH"
+INSTALL_MONITORING="$INSTALL_MONITORING"
+INSTALL_TIMESHIFT="$INSTALL_TIMESHIFT"
+INSTALL_FONTS="$INSTALL_FONTS"
+INSTALL_TLP="$INSTALL_TLP"
+INSTALL_BLUETOOTH="$INSTALL_BLUETOOTH"
+INSTALL_CPUPOWER="$INSTALL_CPUPOWER"
+INSTALL_SYSCTL="$INSTALL_SYSCTL"
+INSTALL_KERNEL_OPTS="$INSTALL_KERNEL_OPTS"
+INSTALL_OMZ="$INSTALL_OMZ"
+INSTALL_GRAPHICS="$INSTALL_GRAPHICS"
+INSTALL_FIREWALL="$INSTALL_FIREWALL"
+EOF
+    
+    # Initialize state management
+    detect_resume
+    handle_skip_to
+    
+    # WiFi setup
+    if [[ $INSTALL_WIFI =~ ^[Yy]$ ]]; then
+        step_header "NETWORK SETUP"
+    if skip_if_done "WIFI_SETUP" "WiFi configuration"; then
+        :
+    else
+        echo "Setting up network connection..."
+        WIFI_CONNECTED=false
+        if iwctl device list | grep -q wlan; then
+            echo "WiFi adapter detected. Available networks:"
+            iwctl station wlan0 scan
+            sleep 3
+            iwctl station wlan0 get-networks
+            echo
+            read -p "Enter WiFi network name (SSID): " wifi_ssid
+            read -s -p "Enter WiFi password: " wifi_password
+            echo
+            
+            echo "Connecting to $wifi_ssid..."
+            iwctl --passphrase="$wifi_password" station wlan0 connect "$wifi_ssid"
+            
+            # Wait a moment for connection
+            sleep 5
+            
+            # Test internet connection
+            if ping -c 1 archlinux.org &> /dev/null; then
+                echo "✓ Internet connection established"
+                WIFI_CONNECTED=true
+                
+                # Save WiFi credentials for post-install
+                mkdir -p /tmp/wifi-backup
+                cat > /tmp/wifi-backup/wifi-credentials <<EOF
+WIFI_SSID="$wifi_ssid"
+WIFI_PASSWORD="$wifi_password"
+EOF
+                echo "✓ WiFi credentials saved for post-install setup"
+                
+                save_state "WIFI_SETUP"
+            else
+                echo "✗ Failed to connect to internet. Continuing anyway..."
+                echo "You may need to manually configure network connection."
+            fi
+        else
+            echo "No WiFi adapter found or ethernet already connected"
+            if ping -c 1 archlinux.org &> /dev/null; then
+                echo "✓ Internet connection detected"
+                save_state "WIFI_SETUP"
+            else
+                echo "✗ No internet connection. Please configure network manually."
+                read -p "Press Enter to continue or Ctrl+C to exit..."
+            fi
+        fi
+    else
+        echo "Skipping WiFi setup"
+        # Still need to check internet connection
+        if ping -c 1 archlinux.org &> /dev/null; then
+            echo "✓ Internet connection detected"
+        else
+            echo "⚠ No internet connection detected"
+            read -p "Press Enter to continue or Ctrl+C to exit..."
+        fi
+    fi
+    
+    # Partition selection
+    step_header "PARTITION SELECTION"
+    if skip_if_done "PARTITIONING" "Partition selection"; then
+        # Load previously saved partition info
+        if [[ -f /tmp/partition_info ]]; then
+            source /tmp/partition_info
+            echo "Using previously selected partitions:"
+            echo "EFI: $EFI_PART"
+            echo "Root: $ROOT_PART"
+        else
+            echo "Error: Previous partition info not found!"
+            exit 1
+        fi
+    else
+        # List available block devices
+        echo "Available block devices:"
+        lsblk -p
+        
+        # Get partition inputs
+        read -p "Enter EFI partition (e.g., /dev/nvme0n1p1): " EFI_PART
+        read -p "Enter root partition (e.g., /dev/nvme0n1p2): " ROOT_PART
+        
+        # Verify partitions exist
+        if [[ ! -b "$EFI_PART" ]] || [[ ! -b "$ROOT_PART" ]]; then
+            echo "Error: Partitions $EFI_PART or $ROOT_PART do not exist!"
+            exit 1
+        fi
+        
+        # Save partition info for resume
+        cat > /tmp/partition_info <<EOF
+EFI_PART="$EFI_PART"
+ROOT_PART="$ROOT_PART"
+EOF
+        
+        # Show partition info and confirm
+        echo
+        echo "Selected partitions:"
+        echo "EFI: $EFI_PART"
+        echo "Root: $ROOT_PART"
+        echo
+        lsblk "$EFI_PART" "$ROOT_PART"
+        echo
+        echo "WARNING: This will FORMAT and ERASE all data on $ROOT_PART"
+        echo "This action is IRREVERSIBLE and will destroy ALL existing data!"
+        read -p "Type YES to continue: " confirm
+        
+        if [[ "$confirm" != "YES" ]]; then
+            echo "Installation cancelled."
+            exit 1
+        fi
+        
+        save_state "PARTITIONING"
+    fi
+    
+    # Load partition info for subsequent steps
+    if [[ -f /tmp/partition_info ]]; then
+        source /tmp/partition_info
+    fi
+    
+    # Update system clock
+    step_header "SYSTEM CLOCK"
+    if skip_if_done "CLOCK_SYNC" "System clock sync"; then
+        :
+    else
+        timedatectl set-ntp true
+        save_state "CLOCK_SYNC"
+    fi
+    
+    # Mounting check
+    step_header "PARTITION MOUNTING"
+    if skip_if_done "MOUNTING" "Partition mounting"; then
+        # Verify mounts are still active
+        if ! mountpoint -q /mnt; then
+            echo "Previous mounts lost, remounting..."
+            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
+            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
+            mount "$EFI_PART" /mnt/boot
+        else
+            echo "✓ Partitions already mounted correctly"
+        fi
+    else
+        # Format and mount partitions
+        if mountpoint -q /mnt; then
+            echo "Partitions already mounted, unmounting first..."
+            umount -R /mnt || true
+        fi
+        
+        mkfs.btrfs -f "$ROOT_PART"
+        mount "$ROOT_PART" /mnt
+        
+        # Create Btrfs subvolumes
+        btrfs subvolume create /mnt/@
+        btrfs subvolume create /mnt/@home
+        umount /mnt
+        
+        # Mount subvolumes
+        mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
+        mkdir -p /mnt/{boot,home}
+        mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
+        mount "$EFI_PART" /mnt/boot
+        
+        save_state "MOUNTING"
+    fi
+    
+    # Mirror optimization
+    step_header "MIRROR OPTIMIZATION"
+    if skip_if_done "MIRRORS" "Mirror optimization"; then
+        :
+    else
+        echo "Optimizing mirrors (this may take a few minutes)..."
+        timeout 300 reflector --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || {
+            echo "Reflector timed out after 5 minutes, using existing mirrors"
+        }
+        save_state "MIRRORS"
+    fi
+    
+    # Base system installation
+    step_header "BASE SYSTEM INSTALLATION"
+    if skip_if_done "PACSTRAP" "Base system installation"; then
+        if [[ ! -f /mnt/usr/bin/pacman ]]; then
+            echo "Base system appears incomplete, reinstalling..."
+            pacstrap -K /mnt base base-devel linux linux-firmware linux-headers
+        else
+            echo "✓ Base system already installed correctly"
+        fi
+    else
+        pacstrap -K /mnt base base-devel linux linux-firmware linux-headers
+        save_state "PACSTRAP"
+    fi
+    
+    # Generate fstab
+    step_header "FSTAB GENERATION"
+    if skip_if_done "FSTAB" "Fstab generation"; then
+        :
+    else
+        genfstab -U /mnt >> /mnt/etc/fstab
+        save_state "FSTAB"
+    fi
+    
+    # Setup zram
+    if [[ $INSTALL_ZRAM =~ ^[Yy]$ ]]; then
+        step_header "ZRAM CONFIGURATION"
+        if skip_if_done "ZRAM" "Zram configuration"; then
+            :
+        else
+            # Install zram-generator (modern systemd-native approach)
+            arch-chroot /mnt pacman -S --noconfirm --needed zram-generator
+            
+            # Configure zram-generator
+            cat > /mnt/etc/systemd/zram-generator.conf <<EOF
 [zram0]
 zram-size = 8192
 compression-algorithm = zstd
-ZRAM
-systemctl enable systemd-zram-setup@zram0.service
+EOF
+            
+            save_state "ZRAM"
+        fi
+    else
+        echo "Skipping ZRAM installation"
+    fi
+    
+    # Copy script and state for post-install
+    cp "$0" /mnt/root/ultimate-install.sh
+    cp "$STATE_FILE" /mnt/root/install-state.backup 2>/dev/null || true
+    cp /tmp/install-preferences /mnt/root/install-preferences
+    
+    # Copy WiFi credentials if they exist
+    if [[ -f /tmp/wifi-backup/wifi-credentials ]]; then
+        cp /tmp/wifi-backup/wifi-credentials /mnt/root/wifi-credentials
+        echo "✓ WiFi credentials copied to new system"
+    fi
+    
+    # Chroot configuration
+    step_header "CHROOT CONFIGURATION"
+    if skip_if_done "CHROOT" "Chroot configuration"; then
+        :
+    else
+        # Load installation preferences
+        source /tmp/install-preferences
+        
+        arch-chroot /mnt /bin/bash <<CHROOT_EOF
+set -euo pipefail
 
-# TRIM
-systemctl enable fstrim.timer
+# Load preferences in chroot
+INSTALL_PIPEWIRE="$INSTALL_PIPEWIRE"
+INSTALL_ZSH="$INSTALL_ZSH"
+INSTALL_MONITORING="$INSTALL_MONITORING"
+INSTALL_TIMESHIFT="$INSTALL_TIMESHIFT"
+INSTALL_FONTS="$INSTALL_FONTS"
+INSTALL_TLP="$INSTALL_TLP"
+INSTALL_BLUETOOTH="$INSTALL_BLUETOOTH"
+INSTALL_CPUPOWER="$INSTALL_CPUPOWER"
+INSTALL_SYSCTL="$INSTALL_SYSCTL"
+INSTALL_FIREWALL="$INSTALL_FIREWALL"
+
+# Set timezone
+ln -sf /usr/share/zoneinfo/Asia/Kathmandu /etc/localtime
+hwclock --systohc
+
+# Set locale
+sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+locale-gen
+echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+
+# Set hostname
+echo 'ArchLinux' > /etc/hostname
+
+# Configure hosts file
+cat > /etc/hosts <<EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   ArchLinux.localdomain ArchLinux
+EOF
+
+# Get user credentials
+echo "Enter your desired username:"
+read -r username
+echo "Enter password (will be used for both user and root):"
+read -s password
+
+# Set root password
+echo "root:$password" | chpasswd
+
+# Create user
+useradd -m -G wheel -s /bin/zsh "$username"
+echo "$username:$password" | chpasswd
+
+# Configure sudo
+sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+# Configure pacman
+sed -i 's/^#Color/Color/' /etc/pacman.conf
+sed -i 's/^#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf
+
+# Enable multilib
+sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
+
+# Build package list based on preferences
+PACKAGES="networkmanager efibootmgr btrfs-progs dosfstools e2fsprogs ntfs-3g \
+tar unrar unzip zip git nano vim wget curl sudo reflector \
+man-db man-pages texinfo bash-completion xdg-utils xdg-user-dirs \
+archlinux-keyring pacman-contrib pkgfile"
+
+# Add optional packages
+[ "\$INSTALL_PIPEWIRE" = "y" ] || [ "\$INSTALL_PIPEWIRE" = "Y" ] && \
+    PACKAGES="\$PACKAGES pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber"
+
+[ "\$INSTALL_ZSH" = "y" ] || [ "\$INSTALL_ZSH" = "Y" ] && \
+    PACKAGES="\$PACKAGES zsh zsh-completions"
+
+[ "\$INSTALL_MONITORING" = "y" ] || [ "\$INSTALL_MONITORING" = "Y" ] && \
+    PACKAGES="\$PACKAGES htop btop tree"
+
+[ "\$INSTALL_TIMESHIFT" = "y" ] || [ "\$INSTALL_TIMESHIFT" = "Y" ] && \
+    PACKAGES="\$PACKAGES timeshift rsync mtools"
+
+[ "\$INSTALL_FONTS" = "y" ] || [ "\$INSTALL_FONTS" = "Y" ] && \
+    PACKAGES="\$PACKAGES ttf-dejavu ttf-liberation noto-fonts noto-fonts-emoji"
+
+[ "\$INSTALL_TLP" = "y" ] || [ "\$INSTALL_TLP" = "Y" ] && \
+    PACKAGES="\$PACKAGES tlp tlp-rdw"
+
+[ "\$INSTALL_BLUETOOTH" = "y" ] || [ "\$INSTALL_BLUETOOTH" = "Y" ] && \
+    PACKAGES="\$PACKAGES bluez bluez-utils blueman"
+
+[ "\$INSTALL_CPUPOWER" = "y" ] || [ "\$INSTALL_CPUPOWER" = "Y" ] && \
+    PACKAGES="\$PACKAGES cpupower"
+
+[ "\$INSTALL_FIREWALL" = "y" ] || [ "\$INSTALL_FIREWALL" = "Y" ] && \
+    PACKAGES="\$PACKAGES ufw"
+
+# Install additional packages
+pacman -Syu --noconfirm \$PACKAGES
+
+# Generate initramfs
+mkinitcpio -P
+
+# Install systemd-boot
+bootctl install
+
+# Configure bootloader
+mkdir -p /boot/loader/entries
+
+cat > /boot/loader/loader.conf <<EOF
+default arch.conf
+timeout 5
+console-mode max
+editor no
+EOF
+
+ROOT_UUID=$(blkid -s UUID -o value $(echo "$ROOT_PART"))
+
+cat > /boot/loader/entries/arch.conf <<EOF
+title   Arch Linux
+linux   /vmlinuz-linux
+initrd  /initramfs-linux.img
+options root=UUID=$ROOT_UUID rw rootflags=subvol=@,compress=zstd:3 quiet loglevel=3
+EOF
+
+cat > /boot/loader/entries/arch-fallback.conf <<EOF
+title   Arch Linux (fallback)
+linux   /vmlinuz-linux
+initrd  /initramfs-linux-fallback.img
+options root=UUID=$ROOT_UUID rw rootflags=subvol=@,compress=zstd:3
+EOF
 
 # System optimizations
-pacman -Rns \$(pacman -Qdtq) --noconfirm 2>/dev/null || true
-pacman -Scc --noconfirm
-pacman -S --needed tlp --noconfirm
-systemctl enable --now tlp
-pacman -S --needed cpufrequtils --noconfirm
-echo "GOVERNOR=performance" > /etc/default/cpufreq
-systemctl enable --now cpufreq.service
+tee /etc/sysctl.d/99-performance.conf > /dev/null <<EOF
+# Memory management
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+vm.dirty_ratio=3
+vm.dirty_background_ratio=2
 
-# Yay installation
-su - "$USERNAME" -c "cd /tmp && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si --noconfirm"
+# Network performance
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 65536 134217728
+net.ipv4.tcp_wmem = 4096 65536 134217728
+EOF
 
-# Services
-systemctl enable NetworkManager bluetooth.service pipewire pipewire-pulse wireplumber systemd-zram-setup@zram0.service systemd-timesyncd tlp cpufreq.service
+# CPU governor setup
+echo 'governor="performance"' > /etc/default/cpupower
 
-# Wi-Fi setup
-echo -e "\${YELLOW}Configure Wi-Fi now? (y/n/skip):${RESET}"
-read -p "" WIFI_CHOICE
-if [[ "\$WIFI_CHOICE" == "y" || "\$WIFI_CHOICE" == "Y" ]]; then
-    echo -e "\${YELLOW}Enter SSID:${RESET}"
-    read -r SSID
-    echo -e "\${YELLOW}Enter password:${RESET}"
-    read -s WIFI_PASS
-    nmcli dev wifi connect "\$SSID" password "\$WIFI_PASS"
+# Enable services
+systemctl enable NetworkManager
+
+[ "\$INSTALL_CPUPOWER" = "y" ] || [ "\$INSTALL_CPUPOWER" = "Y" ] && systemctl enable cpupower
+[ "\$INSTALL_TLP" = "y" ] || [ "\$INSTALL_TLP" = "Y" ] && {
+    systemctl enable tlp
+    systemctl mask systemd-rfkill@.service
+    systemctl mask systemd-rfkill.socket
+}
+[ "\$INSTALL_BLUETOOTH" = "y" ] || [ "\$INSTALL_BLUETOOTH" = "Y" ] && systemctl enable bluetooth
+[ "\$INSTALL_FIREWALL" = "y" ] || [ "\$INSTALL_FIREWALL" = "Y" ] && systemctl enable ufw
+
+systemctl enable fstrim.timer
+systemctl enable reflector.timer
+
+CHROOT_EOF
+        
+        save_state "CHROOT"
+    fi
+    
+    # Cleanup and completion
+    step_header "INSTALLATION COMPLETE"
+    umount -R /mnt 2>/dev/null || true
+    sync
+    
+    # Save final state
+    save_state "INSTALLATION_COMPLETE"
+    
+    echo
+    echo "✓ Base installation complete!"
+    echo "Username: $username"
+    echo "Password: [hidden]"
+    echo "Root password: [same as user]"
+    echo
+    echo "After reboot, login as Sudin and run:"
+    echo "sudo /root/ultimate-install.sh postinstall"
+    echo
+    echo "Installation state saved. You can resume with:"
+    echo "./ultimate-install.sh install --skip-to STEP_NAME"
+    echo
+    read -p "Reboot now? (y/N): " reboot_now
+    if [[ $reboot_now =~ ^[Yy]$ ]]; then
+        rm -f "$STATE_FILE"  # Clean up state file
+        reboot
+    fi
+
+elif [[ "$SCRIPT_PHASE" == "postinstall" ]]; then
+    echo "=== POST-INSTALLATION CONFIGURATION ==="
+    echo
+    
+    POST_STATE_FILE="/tmp/arch-postinstall-state"
+    
+    # Check if running as root
+    if [[ $EUID -eq 0 ]]; then
+        echo "Don't run post-install as root! Run as: sudo /root/ultimate-install.sh postinstall"
+        exit 1
+    fi
+    
+    USERNAME=$(whoami)
+    echo "Running post-install setup for user: $USERNAME"
+    
+    # Load installation preferences
+    if [[ -f /root/install-preferences ]]; then
+        source /root/install-preferences
+        echo "✓ Loaded installation preferences"
+    else
+        echo "⚠ No installation preferences found, using defaults"
+        INSTALL_KERNEL_OPTS="y"
+        INSTALL_OMZ="y"
+        INSTALL_GRAPHICS="y"
+    fi
+    
+    # Restore previous state if exists
+    if [[ -f /root/install-state.backup ]]; then
+        echo "Previous installation state found - main installation was successful"
+    fi
+    
+    # Check for saved WiFi credentials
+    if [[ -f /root/wifi-credentials ]]; then
+        echo "✓ Found saved WiFi credentials from installation"
+    fi
+    
+    # Post-install state management
+    if [[ -f "$POST_STATE_FILE" ]]; then
+        echo "Previous post-install state detected!"
+        echo "Completed steps:"
+        cat "$POST_STATE_FILE" | sed 's/=true/ ✓/' | sed 's/^/  - /'
+        echo
+        read -p "Resume from where you left off? (y/N): " resume
+        if [[ ! $resume =~ ^[Yy]$ ]]; then
+            echo "Starting fresh post-installation..."
+            rm -f "$POST_STATE_FILE"
+        fi
+    fi
+    echo
+    
+    # System updates
+    step_header "SYSTEM UPDATES"
+    if skip_if_done "UPDATES" "System updates" && [[ -f "$POST_STATE_FILE" ]]; then
+        :
+    else
+        echo "Updating system packages..."
+        sudo pacman -Syu --noconfirm
+        echo "$1=true" >> "$POST_STATE_FILE"
+    fi
+    
+    # WiFi auto-configuration with NetworkManager
+    step_header "WIFI CONFIGURATION"
+    if grep -q "POST_WIFI=true" "$POST_STATE_FILE" 2>/dev/null; then
+        echo "✓ WiFi already configured - SKIPPING"
+    else
+        if [[ -f /root/wifi-credentials ]]; then
+            echo "Configuring WiFi with NetworkManager..."
+            source /root/wifi-credentials
+            
+            # Check if WiFi device exists
+            if nmcli device status | grep -q wifi; then
+                # Create NetworkManager connection
+                sudo nmcli device wifi connect "$WIFI_SSID" password "$WIFI_PASSWORD" && {
+                    echo "✓ WiFi connection configured successfully!"
+                    echo "✓ Network will auto-connect on boot"
+                    
+                    # Securely delete credentials file
+                    sudo shred -u /root/wifi-credentials
+                    echo "✓ WiFi credentials securely deleted"
+                } || {
+                    echo "⚠ Failed to configure WiFi, credentials preserved at /root/wifi-credentials"
+                    echo "You can manually connect later with:"
+                    echo "nmcli device wifi connect \"$WIFI_SSID\" password \"YOUR_PASSWORD\""
+                }
+            else
+                echo "⚠ No WiFi device detected, skipping auto-configuration"
+                echo "WiFi credentials preserved at /root/wifi-credentials for manual setup"
+            fi
+        else
+            echo "No saved WiFi credentials found (ethernet or manual setup)"
+        fi
+        echo "POST_WIFI=true" >> "$POST_STATE_FILE"
+    fi
+    
+    # Kernel parameter optimization
+    if [[ $INSTALL_KERNEL_OPTS =~ ^[Yy]$ ]]; then
+        step_header "KERNEL OPTIMIZATION"
+        if grep -q "POST_KERNEL=true" "$POST_STATE_FILE" 2>/dev/null; then
+            echo "✓ Kernel optimization already completed - SKIPPING"
+        else
+            echo "Optimizing kernel parameters..."
+            if lsblk | grep -q nvme; then
+                ELEVATOR="none"
+                echo "NVMe SSD detected, using 'none' scheduler"
+            else
+                ELEVATOR="mq-deadline"
+                echo "SATA SSD detected, using 'mq-deadline' scheduler"
+            fi
+            
+            BOOT_ENTRY="/boot/loader/entries/arch.conf"
+            if [[ -f "$BOOT_ENTRY" ]]; then
+                sudo cp "$BOOT_ENTRY" "${BOOT_ENTRY}.backup"
+                sudo sed -i "s/quiet loglevel=3/elevator=$ELEVATOR kernel.yama.ptrace_scope=1 mitigations=off quiet loglevel=3/" "$BOOT_ENTRY"
+                echo "Kernel parameters updated"
+            fi
+            echo "POST_KERNEL=true" >> "$POST_STATE_FILE"
+        fi
+    else
+        echo "Skipping kernel optimization"
+    fi
+    
+    # YAY installation
+    step_header "YAY AUR HELPER"
+    if grep -q "POST_YAY=true" "$POST_STATE_FILE" 2>/dev/null; then
+        echo "✓ yay already installed - SKIPPING"
+    else
+        echo "Installing yay AUR helper..."
+        if ! command -v yay &> /dev/null; then
+            cd /tmp
+            git clone https://aur.archlinux.org/yay.git
+            cd yay
+            makepkg -si --noconfirm
+            cd ~
+            rm -rf /tmp/yay
+            echo "yay installed successfully!"
+        else
+            echo "yay already installed"
+        fi
+        echo "POST_YAY=true" >> "$POST_STATE_FILE"
+    fi
+    
+    # ZSH setup
+    if [[ $INSTALL_OMZ =~ ^[Yy]$ ]]; then
+        step_header "ZSH AND OH-MY-ZSH SETUP"
+        if grep -q "POST_ZSH=true" "$POST_STATE_FILE" 2>/dev/null; then
+            echo "✓ Oh My Zsh already configured - SKIPPING"
+        else
+            echo "Setting up Zsh and Oh My Zsh..."
+            if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
+                RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+                
+                ZSH_CUSTOM="$HOME/.oh-my-zsh/custom"
+                
+                git clone https://github.com/zsh-users/zsh-autosuggestions "$ZSH_CUSTOM/plugins/zsh-autosuggestions"
+                git clone https://github.com/zsh-users/zsh-syntax-highlighting "$ZSH_CUSTOM/plugins/zsh-syntax-highlighting"
+                git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$ZSH_CUSTOM/themes/powerlevel10k"
+                
+                sed -i 's/ZSH_THEME="robbyrussell"/ZSH_THEME="powerlevel10k\/powerlevel10k"/' ~/.zshrc
+                sed -i 's/plugins=(git)/plugins=(git zsh-autosuggestions zsh-syntax-highlighting sudo extract)/' ~/.zshrc
+                
+                echo "Oh My Zsh setup complete!"
+            fi
+            echo "POST_ZSH=true" >> "$POST_STATE_FILE"
+        fi
+    else
+        echo "Skipping Oh My Zsh installation"
+    fi
+    
+    # Install additional fonts and tools
+    if [[ $INSTALL_OMZ =~ ^[Yy]$ ]]; then
+        step_header "ADDITIONAL PACKAGES"
+        if grep -q "POST_PACKAGES=true" "$POST_STATE_FILE" 2>/dev/null; then
+            echo "✓ Additional packages already installed - SKIPPING"
+        else
+            echo "Installing additional packages..."
+            yay -S --noconfirm --needed \
+                ttf-meslo-nerd-font-powerlevel10k
+            echo "POST_PACKAGES=true" >> "$POST_STATE_FILE"
+        fi
+    else
+        echo "Skipping additional font packages"
+    fi
+    
+    # Configure PipeWire services
+    step_header "PIPEWIRE CONFIGURATION"
+    if grep -q "POST_PIPEWIRE=true" "$POST_STATE_FILE" 2>/dev/null; then
+        echo "✓ PipeWire already configured - SKIPPING"
+    else
+        echo "Configuring PipeWire services..."
+        systemctl --user enable pipewire pipewire-pulse wireplumber
+        systemctl --user start pipewire pipewire-pulse wireplumber
+        echo "POST_PIPEWIRE=true" >> "$POST_STATE_FILE"
+    fi
+    
+    # Graphics drivers prompt
+    if [[ $INSTALL_GRAPHICS =~ ^[Yy]$ ]]; then
+        step_header "GRAPHICS DRIVERS"
+        if grep -q "POST_GRAPHICS=true" "$POST_STATE_FILE" 2>/dev/null; then
+            echo "✓ Graphics drivers already handled - SKIPPING"
+        else
+        echo "Select graphics drivers to install:"
+        echo "1) AMD drivers (default for integrated graphics)"
+        echo "2) NVIDIA drivers"
+        echo "3) AMD + NVIDIA (hybrid laptop setup)"
+        echo "4) Skip graphics drivers"
+        read -p "Choose option (1/2/3/4) [default: 1]: " gpu_choice
+        
+        # Default to AMD if user just presses Enter
+        gpu_choice=${gpu_choice:-1}
+        
+        case $gpu_choice in
+            1)
+                echo "Installing AMD drivers..."
+                sudo pacman -S --needed --noconfirm \
+                    mesa mesa-utils lib32-mesa \
+                    vulkan-icd-loader lib32-vulkan-icd-loader \
+                    vulkan-radeon lib32-vulkan-radeon \
+                    vulkan-tools xf86-video-amdgpu \
+                    linux-firmware-amdgpu
+                
+                echo "AMD drivers installed (integrated graphics default)!"
+                ;;
+            2)
+                echo "Installing NVIDIA drivers..."
+                sudo pacman -S --needed --noconfirm \
+                    nvidia-open nvidia-utils lib32-nvidia-utils \
+                    nvidia-settings nvidia-prime
+                
+                if ! grep -q "MODULES=(nvidia" /etc/mkinitcpio.conf; then
+                    sudo sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+                    sudo mkinitcpio -P
+                fi
+                
+                if ! grep -q "nvidia-drm.modeset=1" /boot/loader/entries/arch.conf; then
+                    sudo sed -i 's/quiet loglevel=3/nvidia-drm.modeset=1 quiet loglevel=3/' /boot/loader/entries/arch.conf
+                fi
+                
+                echo "NVIDIA drivers installed!"
+                ;;
+            3)
+                echo "Installing both AMD and NVIDIA drivers (hybrid setup)..."
+                # Install AMD drivers first (for integrated)
+                sudo pacman -S --needed --noconfirm \
+                    mesa mesa-utils lib32-mesa \
+                    vulkan-icd-loader lib32-vulkan-icd-loader \
+                    vulkan-radeon lib32-vulkan-radeon \
+                    vulkan-tools xf86-video-amdgpu \
+                    linux-firmware-amdgpu
+                
+                # Install NVIDIA drivers (for dedicated)
+                sudo pacman -S --needed --noconfirm \
+                    nvidia-open nvidia-utils lib32-nvidia-utils \
+                    nvidia-settings nvidia-prime
+                
+                if ! grep -q "MODULES=(nvidia" /etc/mkinitcpio.conf; then
+                    sudo sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+                    sudo mkinitcpio -P
+                fi
+                
+                if ! grep -q "nvidia-drm.modeset=1" /boot/loader/entries/arch.conf; then
+                    sudo sed -i 's/quiet loglevel=3/nvidia-drm.modeset=1 quiet loglevel=3/' /boot/loader/entries/arch.conf
+                fi
+                
+                # Configure for AMD default, NVIDIA on-demand
+                echo "Configuring AMD as default, NVIDIA for on-demand use..."
+                echo "Use 'prime-run' command to run programs on NVIDIA GPU"
+                echo "Example: prime-run glxinfo | grep 'OpenGL renderer'"
+                
+                echo "Hybrid AMD+NVIDIA setup complete!"
+                ;;
+            4)
+                echo "Skipping graphics driver installation"
+                ;;
+            *)
+                echo "Invalid choice, skipping graphics drivers"
+                ;;
+        esac
+        echo "POST_GRAPHICS=true" >> "$POST_STATE_FILE"
+        fi
+    else
+        echo "Skipping graphics driver installation"
+    fi
+    
+    # Final setup
+    step_header "FINAL CONFIGURATION"
+    if grep -q "POST_FINAL=true" "$POST_STATE_FILE" 2>/dev/null; then
+        echo "✓ Final configuration already completed - SKIPPING"
+    else
+        echo "Final configuration..."
+        mkdir -p ~/Documents ~/Downloads ~/Pictures ~/Videos ~/Music
+        
+        # Only add to lp group if Bluetooth was installed
+        if [[ $INSTALL_BLUETOOTH =~ ^[Yy]$ ]]; then
+            sudo usermod -a -G lp "$USERNAME"
+        fi
+        
+        # Only enable firewall if it was installed
+        if [[ $INSTALL_FIREWALL =~ ^[Yy]$ ]]; then
+            sudo ufw enable
+        fi
+        
+        echo "POST_FINAL=true" >> "$POST_STATE_FILE"
+    fi
+    
+    echo
+    echo "=== POST-INSTALLATION COMPLETE ==="
+    echo
+    echo "System optimizations applied:"
+    echo "  • Memory management optimized"
+    echo "  • CPU governor set to performance"
+    echo "  • SSD TRIM enabled"
+    echo "  • Power management (TLP) enabled"
+    echo "  • Bluetooth configured"
+    echo "  • Firewall (UFW) enabled"
+    echo "  • 8GB zram with zstd compression"
+    echo "  • Oh My Zsh with Powerlevel10k theme"
+    echo
+    echo "After reboot:"
+    echo "  • Configure Powerlevel10k: p10k configure"
+    echo "  • Test zram: cat /proc/swaps && free -h"
+    echo "  • Test bluetooth: bluetoothctl"
+    echo "  • Test NVIDIA (if installed): nvidia-smi"
+    echo
+    read -p "Reboot now? (y/N): " reboot_now
+    if [[ $reboot_now =~ ^[Yy]$ ]]; then
+        rm -f "$POST_STATE_FILE"  # Clean up state file
+        sudo reboot
+    fi
+    
+else
+    echo "Usage: $0 [install|postinstall] [--skip-to STEP_NAME]"
+    echo
+    echo "Phase options:"
+    echo "  install     - Run the initial installation (default)"
+    echo "  postinstall - Run post-installation configuration"
+    echo
+    echo "Skip options for install phase:"
+    echo "  --skip-to partitioning  - Skip to partition selection"
+    echo "  --skip-to mounting      - Skip to partition mounting"
+    echo "  --skip-to mirrors       - Skip to mirror optimization"
+    echo "  --skip-to pacstrap      - Skip to base system installation"
+    echo "  --skip-to fstab         - Skip to fstab generation"
+    echo "  --skip-to zram          - Skip to zram configuration"
+    echo "  --skip-to chroot        - Skip to chroot configuration"
+    echo
+    echo "Examples:"
+    echo "  $0                           - Start fresh installation"
+    echo "  $0 install --skip-to mirrors - Skip to mirror optimization"
+    echo "  $0 postinstall              - Run post-installation setup"
+    exit 1
 fi
-
-echo -e "\${GREEN}\${BOLD}Post-Installation Complete!${RESET}"
-EOF
-
-chmod +x /mnt/root/post-install.sh
-(arch-chroot /mnt bash /root/post-install.sh) & pid=$!
-spinner $pid
-check_status "Post-installation"
-rm /mnt/root/post-install.sh
-
-# Completion message
-breaker
-cat << "EOF"
-       .--.            
-      /   _`.          
-     _) ( )  `.        
-    /  _ _ `.  _`.      
-   /   )  )  )    )     
-  )   /  /  /    /      
- /   /  /  /    /        
-)   )  )  )    )        
- /    /   /    /         
- `._ _ _ _ _ _.'          
-    `"`"`"`"`"`           
-   SETUP COMPLETE!       
-EOF
-echo -e "${GREEN}${BOLD}Installation Done! Type 'reboot' to start your Arch system.${RESET}"
-breaker
