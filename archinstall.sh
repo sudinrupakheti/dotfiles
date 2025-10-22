@@ -439,6 +439,20 @@ EOF
         source /tmp/partition_info
     fi
     
+    # Update system clock
+    step_header "SYSTEM CLOCK"
+    if skip_if_done "CLOCK_SYNC" "System clock sync"; then
+        :
+    else
+        timedatectl set-ntp true
+        save_state "CLOCK_SYNC"
+    fi
+    
+    # Load partition info for subsequent steps
+    if [[ -f /tmp/partition_info ]]; then
+        source /tmp/partition_info
+    fi
+    
     # WiFi setup
     if [[ $INSTALL_WIFI =~ ^[Yy]$ ]]; then
         step_header "NETWORK SETUP"
