@@ -76,15 +76,78 @@ handle_skip_to() {
 }
 
 if [[ "$SCRIPT_PHASE" == "install" ]]; then
-    echo "=== ARCH LINUX ULTIMATE INSTALLATION SCRIPT ==="
-    echo
+    echo "=== ARCH LINUX ULTIMATE INSTALLATION SCRIPT ===" | tee -a "$INSTALL_LOG"
+    echo | tee -a "$INSTALL_LOG"
+    
+    # Pre-installation validation
+    echo "=== PRE-INSTALLATION VALIDATION ===" | tee -a "$INSTALL_LOG"
+    
+    # Check if running in UEFI mode
+    if [[ ! -d /sys/firmware/efi/efivars ]]; then
+        echo "⚠ WARNING: System not booted in UEFI mode!" | tee -a "$INSTALL_LOG"
+        echo "This script requires UEFI boot mode." | tee -a "$INSTALL_LOG"
+        read -p "Continue anyway? (y/N): " continue_bios
+        [[ ! $continue_bios =~ ^[Yy]$ ]] && exit 1
+    else
+        echo "✓ UEFI mode detected" | tee -a "$INSTALL_LOG"
+    fi
+    
+    # Check available RAM
+    TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
+    if [[ $TOTAL_RAM -lt 2048 ]]; then
+        echo "⚠ WARNING: Less than 2GB RAM detected ($TOTAL_RAM MB)" | tee -a "$INSTALL_LOG"
+        echo "Installation may be slow or fail." | tee -a "$INSTALL_LOG"
+        read -p "Continue anyway? (y/N): " continue_ram
+        [[ ! $continue_ram =~ ^[Yy]$ ]] && exit 1
+    else
+        echo "✓ RAM: ${TOTAL_RAM}MB" | tee -a "$INSTALL_LOG"
+    fi
+    
+    # Check internet connectivity
+    if ping -c 1 archlinux.org &> /dev/null; then
+        echo "✓ Internet connection available" | tee -a "$INSTALL_LOG"
+    else
+        echo "⚠ WARNING: No internet connection detected" | tee -a "$INSTALL_LOG"
+        echo "You'll need internet for installation." | tee -a "$INSTALL_LOG"
+        read -p "Continue anyway? (y/N): " continue_net
+        [[ ! $continue_net =~ ^[Yy]$ ]] && exit 1
+    fi
+    
+    # Detect CPU cores for parallel downloads
+    CPU_CORES=$(nproc)
+    if [[ $CPU_CORES -ge 8 ]]; then
+        PARALLEL_DOWNLOADS=10
+    elif [[ $CPU_CORES -ge 4 ]]; then
+        PARALLEL_DOWNLOADS=5
+    else
+        PARALLEL_DOWNLOADS=3
+    fi
+    echo "✓ CPU cores: $CPU_CORES (will use $PARALLEL_DOWNLOADS parallel downloads)" | tee -a "$INSTALL_LOG"
+    
+    echo | tee -a "$INSTALL_LOG"
     
     # Ask about optional components
-    echo "This script can install optional components for a full desktop experience."
-    echo "You can skip all optional components for a minimal installation (useful for VMs/testing)."
-    echo
+    echo "This script can install optional components for a full desktop experience." | tee -a "$INSTALL_LOG"
+    echo "You can skip all optional components for a minimal installation (useful for VMs/testing)." | tee -a "$INSTALL_LOG"
+    echo | tee -a "$INSTALL_LOG"
     read -p "Skip ALL optional components? (y/N): " skip_all_optional
     echo
+    
+    # Filesystem selection
+    echo "Select filesystem for root partition:" | tee -a "$INSTALL_LOG"
+    echo "1) Btrfs (with @ and @home subvolumes, snapshots support)" | tee -a "$INSTALL_LOG"
+    echo "2) ext4 (traditional, simple, stable)" | tee -a "$INSTALL_LOG"
+    read -p "Choose filesystem (1/2) [default: 1]: " fs_choice
+    fs_choice=${fs_choice:-1}
+    
+    if [[ "$fs_choice" == "2" ]]; then
+        USE_BTRFS=false
+        echo "✓ Using ext4 filesystem" | tee -a "$INSTALL_LOG"
+    else
+        USE_BTRFS=true
+        echo "✓ Using Btrfs filesystem with subvolumes" | tee -a "$INSTALL_LOG"
+    fi
+    echo | tee -a "$INSTALL_LOG"
     
     # Set defaults based on skip_all choice
     if [[ $skip_all_optional =~ ^[Yy]$ ]]; then
@@ -103,11 +166,16 @@ if [[ "$SCRIPT_PHASE" == "install" ]]; then
         INSTALL_OMZ="n"
         INSTALL_GRAPHICS="n"
         INSTALL_FIREWALL="n"
-        echo "✓ Minimal installation mode - all optional components will be skipped"
+        echo "✓ Minimal installation mode - all optional components will be skipped" | tee -a "$INSTALL_LOG"
     else
-        # Ask individually for each component
-        read -p "Configure WiFi during installation? (Y/n): " INSTALL_WIFI
-        INSTALL_WIFI=${INSTALL_WIFI:-y}
+        # Check if WiFi adapter exists before asking
+        if iwctl device list 2>/dev/null | grep -q "wlan"; then
+            read -p "Configure WiFi during installation? (Y/n): " INSTALL_WIFI
+            INSTALL_WIFI=${INSTALL_WIFI:-y}
+        else
+            INSTALL_WIFI="n"
+            echo "No WiFi adapter detected - skipping WiFi configuration" | tee -a "$INSTALL_LOG"
+        fi
         
         read -p "Install ZRAM (8GB compressed swap)? (Y/n): " INSTALL_ZRAM
         INSTALL_ZRAM=${INSTALL_ZRAM:-y}
@@ -154,6 +222,7 @@ if [[ "$SCRIPT_PHASE" == "install" ]]; then
     
     # Save installation preferences
     cat > /tmp/install-preferences <<EOF
+USE_BTRFS=$USE_BTRFS
 INSTALL_WIFI="$INSTALL_WIFI"
 INSTALL_ZRAM="$INSTALL_ZRAM"
 INSTALL_PIPEWIRE="$INSTALL_PIPEWIRE"
@@ -169,67 +238,89 @@ INSTALL_KERNEL_OPTS="$INSTALL_KERNEL_OPTS"
 INSTALL_OMZ="$INSTALL_OMZ"
 INSTALL_GRAPHICS="$INSTALL_GRAPHICS"
 INSTALL_FIREWALL="$INSTALL_FIREWALL"
+PARALLEL_DOWNLOADS="$PARALLEL_DOWNLOADS"
+CPU_CORES="$CPU_CORES"
 EOF
+    
+    echo | tee -a "$INSTALL_LOG"
+    echo "=== INSTALLATION SUMMARY ===" | tee -a "$INSTALL_LOG"
+    echo "Please review your installation configuration:" | tee -a "$INSTALL_LOG"
+    echo | tee -a "$INSTALL_LOG"
     
     # Initialize state management
     detect_resume
     handle_skip_to
-    
-    # WiFi setup
-    step_header "NETWORK SETUP"
-
-if skip_if_done "WIFI_SETUP" "WiFi configuration"; then
-    :
-else
-    # Check for VM (skip WiFi if VM)
-    IS_VM=false
-    if grep -qE "(VMware|VirtualBox|KVM|QEMU)" /sys/class/dmi/id/product_name 2>/dev/null; then
-        IS_VM=true
-    fi
-
-    # Try to detect any WiFi adapter
-    WIFI_ADAPTER=$(iwctl device list 2>/dev/null | grep -oP '^\w+' || true)
-
-    if [[ "$IS_VM" == true ]] || [[ -z "$WIFI_ADAPTER" ]]; then
-        echo "⚠ No WiFi adapter found or running in a VM - skipping WiFi setup"
-        # Check internet
-        if ping -c 1 8.8.8.8 &> /dev/null; then
-            echo "✓ Internet connection detected"
-            save_state "WIFI_SETUP"
-        else
-            echo "✗ No internet connection. Please configure network manually."
-            read -p "Press Enter to continue or Ctrl+C to exit..."
-        fi
+    if skip_if_done "WIFI_SETUP" "WiFi configuration"; then
+        :
     else
-        # Real WiFi adapter present - proceed with setup
-        echo "WiFi adapter detected: $WIFI_ADAPTER"
-        iwctl station "$WIFI_ADAPTER" scan
-        sleep 3
-        iwctl station "$WIFI_ADAPTER" get-networks
-        echo
-        read -p "Enter WiFi network name (SSID): " wifi_ssid
-        read -s -p "Enter WiFi password: " wifi_password
-        echo
-
-        echo "Connecting to $wifi_ssid..."
-        iwctl --passphrase="$wifi_password" station "$WIFI_ADAPTER" connect "$wifi_ssid"
-        sleep 5
-
-        if ping -c 1 8.8.8.8 &> /dev/null; then
-            echo "✓ Internet connection established"
-            mkdir -p /tmp/wifi-backup
-            cat > /tmp/wifi-backup/wifi-credentials <<EOF
+        echo "Setting up network connection..."
+        WIFI_CONNECTED=false
+        if iwctl device list | grep -q wlan; then
+            echo "WiFi adapter detected. Available networks:"
+            iwctl station wlan0 scan
+            sleep 3
+            iwctl station wlan0 get-networks
+            echo
+            read -p "Enter WiFi network name (SSID): " wifi_ssid
+            read -s -p "Enter WiFi password: " wifi_password
+            echo
+            
+            echo "Connecting to $wifi_ssid..."
+            iwctl --passphrase="$wifi_password" station wlan0 connect "$wifi_ssid"
+            
+            # Wait a moment for connection
+            sleep 5
+            
+            # Test internet connection
+            if ping -c 1 archlinux.org &> /dev/null; then
+                echo "✓ Internet connection established"
+                WIFI_CONNECTED=true
+                
+                # Save WiFi credentials for post-install
+                mkdir -p /tmp/wifi-backup
+                cat > /tmp/wifi-backup/wifi-credentials <<EOF
 WIFI_SSID="$wifi_ssid"
 WIFI_PASSWORD="$wifi_password"
 EOF
-            echo "✓ WiFi credentials saved for post-install setup"
-            save_state "WIFI_SETUP"
+                echo "✓ WiFi credentials saved for post-install setup"
+                
+                save_state "WIFI_SETUP"
+            else
+                echo "✗ Failed to connect to internet. Continuing anyway..."
+                echo "You may need to manually configure network connection."
+            fi
         else
-            echo "✗ Failed to connect to internet. Continuing anyway..."
+            echo "No WiFi adapter found or ethernet already connected"
+            if ping -c 1 archlinux.org &> /dev/null; then
+                echo "✓ Internet connection detected"
+                save_state "WIFI_SETUP"
+            else
+                echo "✗ No internet connection. Please configure network manually."
+                read -p "Press Enter to continue or Ctrl+C to exit..."
+            fi
+        fi
+    else
+        echo "Skipping WiFi setup"
+        # Still need to check internet connection
+        if ping -c 1 archlinux.org &> /dev/null; then
+            echo "✓ Internet connection detected"
+        else
+            echo "⚠ No internet connection detected"
+            read -p "Press Enter to continue or Ctrl+C to exit..."
         fi
     fi
-fi
-
+    
+    echo | tee -a "$INSTALL_LOG"
+    echo "=== INSTALLATION SUMMARY ===" | tee -a "$INSTALL_LOG"
+    echo "Please review your installation configuration:" | tee -a "$INSTALL_LOG"
+    echo | tee -a "$INSTALL_LOG"
+    
+    # Wait for partition selection before showing summary
+    # This section will be filled after partition selection
+    
+    # Initialize state management
+    detect_resume
+    handle_skip_to
     
     # Partition selection
     step_header "PARTITION SELECTION"
@@ -237,26 +328,47 @@ fi
         # Load previously saved partition info
         if [[ -f /tmp/partition_info ]]; then
             source /tmp/partition_info
-            echo "Using previously selected partitions:"
-            echo "EFI: $EFI_PART"
-            echo "Root: $ROOT_PART"
+            echo "Using previously selected partitions:" | tee -a "$INSTALL_LOG"
+            echo "EFI: $EFI_PART" | tee -a "$INSTALL_LOG"
+            echo "Root: $ROOT_PART" | tee -a "$INSTALL_LOG"
         else
-            echo "Error: Previous partition info not found!"
+            echo "Error: Previous partition info not found!" | tee -a "$INSTALL_LOG"
             exit 1
         fi
     else
         # List available block devices
-        echo "Available block devices:"
-        lsblk -p
+        echo "Available block devices:" | tee -a "$INSTALL_LOG"
+        lsblk -p | tee -a "$INSTALL_LOG"
         
         # Get partition inputs
         read -p "Enter EFI partition (e.g., /dev/nvme0n1p1): " EFI_PART
         read -p "Enter root partition (e.g., /dev/nvme0n1p2): " ROOT_PART
         
+        echo "EFI: $EFI_PART" >> "$INSTALL_LOG"
+        echo "Root: $ROOT_PART" >> "$INSTALL_LOG"
+        
         # Verify partitions exist
         if [[ ! -b "$EFI_PART" ]] || [[ ! -b "$ROOT_PART" ]]; then
-            echo "Error: Partitions $EFI_PART or $ROOT_PART do not exist!"
+            echo "Error: Partitions $EFI_PART or $ROOT_PART do not exist!" | tee -a "$INSTALL_LOG"
             exit 1
+        fi
+        
+        # Check partition sizes
+        EFI_SIZE=$(lsblk -b -n -o SIZE "$EFI_PART")
+        ROOT_SIZE=$(lsblk -b -n -o SIZE "$ROOT_PART")
+        EFI_SIZE_MB=$((EFI_SIZE / 1024 / 1024))
+        ROOT_SIZE_GB=$((ROOT_SIZE / 1024 / 1024 / 1024))
+        
+        if [[ $EFI_SIZE_MB -lt 512 ]]; then
+            echo "⚠ WARNING: EFI partition is less than 512MB (${EFI_SIZE_MB}MB)" | tee -a "$INSTALL_LOG"
+            read -p "Continue anyway? (y/N): " continue_efi
+            [[ ! $continue_efi =~ ^[Yy]$ ]] && exit 1
+        fi
+        
+        if [[ $ROOT_SIZE_GB -lt 20 ]]; then
+            echo "⚠ WARNING: Root partition is less than 20GB (${ROOT_SIZE_GB}GB)" | tee -a "$INSTALL_LOG"
+            read -p "Continue anyway? (y/N): " continue_root
+            [[ ! $continue_root =~ ^[Yy]$ ]] && exit 1
         fi
         
         # Save partition info for resume
@@ -265,20 +377,57 @@ EFI_PART="$EFI_PART"
 ROOT_PART="$ROOT_PART"
 EOF
         
-        # Show partition info and confirm
-        echo
-        echo "Selected partitions:"
-        echo "EFI: $EFI_PART"
-        echo "Root: $ROOT_PART"
-        echo
-        lsblk "$EFI_PART" "$ROOT_PART"
-        echo
-        echo "WARNING: This will FORMAT and ERASE all data on $ROOT_PART"
-        echo "This action is IRREVERSIBLE and will destroy ALL existing data!"
-        read -p "Type YES to continue: " confirm
+        # Show complete installation summary
+        echo | tee -a "$INSTALL_LOG"
+        echo "========================================" | tee -a "$INSTALL_LOG"
+        echo "       FINAL INSTALLATION REVIEW        " | tee -a "$INSTALL_LOG"
+        echo "========================================" | tee -a "$INSTALL_LOG"
+        echo | tee -a "$INSTALL_LOG"
+        echo "PARTITIONS:" | tee -a "$INSTALL_LOG"
+        echo "  EFI:  $EFI_PART (${EFI_SIZE_MB}MB)" | tee -a "$INSTALL_LOG"
+        echo "  Root: $ROOT_PART (${ROOT_SIZE_GB}GB)" | tee -a "$INSTALL_LOG"
+        echo | tee -a "$INSTALL_LOG"
+        echo "SYSTEM CONFIGURATION:" | tee -a "$INSTALL_LOG"
+        echo "  Hostname: ArchLinux" | tee -a "$INSTALL_LOG"
+        echo "  Timezone: Asia/Kathmandu" | tee -a "$INSTALL_LOG"
+        echo "  Locale: en_US.UTF-8" | tee -a "$INSTALL_LOG"
+        if $USE_BTRFS; then
+            echo "  Filesystem: Btrfs with @ and @home subvolumes" | tee -a "$INSTALL_LOG"
+        else
+            echo "  Filesystem: ext4" | tee -a "$INSTALL_LOG"
+        fi
+        echo "  Bootloader: systemd-boot" | tee -a "$INSTALL_LOG"
+        echo "  CPU Cores: $CPU_CORES" | tee -a "$INSTALL_LOG"
+        echo "  Parallel Downloads: $PARALLEL_DOWNLOADS" | tee -a "$INSTALL_LOG"
+        echo | tee -a "$INSTALL_LOG"
+        echo "OPTIONAL COMPONENTS:" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_WIFI =~ ^[Yy]$ ]] && echo "  ✓ WiFi Configuration" | tee -a "$INSTALL_LOG" || echo "  ✗ WiFi Configuration" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_ZRAM =~ ^[Yy]$ ]] && echo "  ✓ ZRAM (8GB)" | tee -a "$INSTALL_LOG" || echo "  ✗ ZRAM" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_PIPEWIRE =~ ^[Yy]$ ]] && echo "  ✓ PipeWire Audio" | tee -a "$INSTALL_LOG" || echo "  ✗ PipeWire Audio" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_ZSH =~ ^[Yy]$ ]] && echo "  ✓ Zsh Shell" | tee -a "$INSTALL_LOG" || echo "  ✗ Zsh Shell (using bash)" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_MONITORING =~ ^[Yy]$ ]] && echo "  ✓ Monitoring Tools" | tee -a "$INSTALL_LOG" || echo "  ✗ Monitoring Tools" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_TIMESHIFT =~ ^[Yy]$ ]] && echo "  ✓ Timeshift Backups" | tee -a "$INSTALL_LOG" || echo "  ✗ Timeshift Backups" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_FONTS =~ ^[Yy]$ ]] && echo "  ✓ Additional Fonts" | tee -a "$INSTALL_LOG" || echo "  ✗ Additional Fonts" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_TLP =~ ^[Yy]$ ]] && echo "  ✓ TLP Power Management" | tee -a "$INSTALL_LOG" || echo "  ✗ TLP Power Management" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_BLUETOOTH =~ ^[Yy]$ ]] && echo "  ✓ Bluetooth" | tee -a "$INSTALL_LOG" || echo "  ✗ Bluetooth" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_CPUPOWER =~ ^[Yy]$ ]] && echo "  ✓ CPU Governor" | tee -a "$INSTALL_LOG" || echo "  ✗ CPU Governor" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_SYSCTL =~ ^[Yy]$ ]] && echo "  ✓ System Optimizations" | tee -a "$INSTALL_LOG" || echo "  ✗ System Optimizations" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_FIREWALL =~ ^[Yy]$ ]] && echo "  ✓ UFW Firewall" | tee -a "$INSTALL_LOG" || echo "  ✗ UFW Firewall" | tee -a "$INSTALL_LOG"
+        echo | tee -a "$INSTALL_LOG"
+        echo "POST-INSTALL OPTIONS:" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_KERNEL_OPTS =~ ^[Yy]$ ]] && echo "  ✓ Kernel Optimizations" | tee -a "$INSTALL_LOG" || echo "  ✗ Kernel Optimizations" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_OMZ =~ ^[Yy]$ ]] && echo "  ✓ Oh My Zsh + Powerlevel10k" | tee -a "$INSTALL_LOG" || echo "  ✗ Oh My Zsh" | tee -a "$INSTALL_LOG"
+        [[ $INSTALL_GRAPHICS =~ ^[Yy]$ ]] && echo "  ✓ Graphics Driver Prompt" | tee -a "$INSTALL_LOG" || echo "  ✗ Graphics Drivers" | tee -a "$INSTALL_LOG"
+        echo | tee -a "$INSTALL_LOG"
+        echo "========================================" | tee -a "$INSTALL_LOG"
+        echo | tee -a "$INSTALL_LOG"
         
-        if [[ "$confirm" != "YES" ]]; then
-            echo "Installation cancelled."
+        echo "⚠ WARNING: This will FORMAT and ERASE all data on $ROOT_PART" | tee -a "$INSTALL_LOG"
+        echo "This action is IRREVERSIBLE and will destroy ALL existing data!" | tee -a "$INSTALL_LOG"
+        read -p "Type 'CONFIRM' to proceed: " confirm
+        
+        if [[ "$confirm" != "CONFIRM" ]]; then
+            echo "Installation cancelled." | tee -a "$INSTALL_LOG"
             exit 1
         fi
         
@@ -289,6 +438,10 @@ EOF
     if [[ -f /tmp/partition_info ]]; then
         source /tmp/partition_info
     fi
+    
+    # WiFi setup
+    if [[ $INSTALL_WIFI =~ ^[Yy]$ ]]; then
+        step_header "NETWORK SETUP"
     
     # Update system clock
     step_header "SYSTEM CLOCK"
@@ -304,32 +457,48 @@ EOF
     if skip_if_done "MOUNTING" "Partition mounting"; then
         # Verify mounts are still active
         if ! mountpoint -q /mnt; then
-            echo "Previous mounts lost, remounting..."
-            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
-            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
+            echo "Previous mounts lost, remounting..." | tee -a "$INSTALL_LOG"
+            if $USE_BTRFS; then
+                mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
+                mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
+            else
+                mount "$ROOT_PART" /mnt
+                mkdir -p /mnt/home
+            fi
             mount "$EFI_PART" /mnt/boot
         else
-            echo "✓ Partitions already mounted correctly"
+            echo "✓ Partitions already mounted correctly" | tee -a "$INSTALL_LOG"
         fi
     else
         # Format and mount partitions
         if mountpoint -q /mnt; then
-            echo "Partitions already mounted, unmounting first..."
+            echo "Partitions already mounted, unmounting first..." | tee -a "$INSTALL_LOG"
             umount -R /mnt || true
         fi
         
-        mkfs.btrfs -f "$ROOT_PART"
-        mount "$ROOT_PART" /mnt
+        if $USE_BTRFS; then
+            echo "Formatting root partition as Btrfs..." | tee -a "$INSTALL_LOG"
+            mkfs.btrfs -f "$ROOT_PART" | tee -a "$INSTALL_LOG"
+            mount "$ROOT_PART" /mnt
+            
+            # Create Btrfs subvolumes
+            echo "Creating Btrfs subvolumes..." | tee -a "$INSTALL_LOG"
+            btrfs subvolume create /mnt/@
+            btrfs subvolume create /mnt/@home
+            umount /mnt
+            
+            # Mount subvolumes
+            echo "Mounting Btrfs subvolumes..." | tee -a "$INSTALL_LOG"
+            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
+            mkdir -p /mnt/{boot,home}
+            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
+        else
+            echo "Formatting root partition as ext4..." | tee -a "$INSTALL_LOG"
+            mkfs.ext4 -F "$ROOT_PART" | tee -a "$INSTALL_LOG"
+            mount "$ROOT_PART" /mnt
+            mkdir -p /mnt/{boot,home}
+        fi
         
-        # Create Btrfs subvolumes
-        btrfs subvolume create /mnt/@
-        btrfs subvolume create /mnt/@home
-        umount /mnt
-        
-        # Mount subvolumes
-        mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
-        mkdir -p /mnt/{boot,home}
-        mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
         mount "$EFI_PART" /mnt/boot
         
         save_state "MOUNTING"
@@ -340,9 +509,9 @@ EOF
     if skip_if_done "MIRRORS" "Mirror optimization"; then
         :
     else
-        echo "Optimizing mirrors (this may take a few minutes)..."
-        timeout 300 reflector --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || {
-            echo "Reflector timed out after 5 minutes, using existing mirrors"
+        echo "Optimizing mirrors (limited to 20 mirrors, this may take a few minutes)..." | tee -a "$INSTALL_LOG"
+        timeout 300 reflector --latest 20 --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || {
+            echo "Reflector timed out after 5 minutes, using existing mirrors" | tee -a "$INSTALL_LOG"
         }
         save_state "MIRRORS"
     fi
@@ -415,6 +584,7 @@ EOF
 set -euo pipefail
 
 # Load preferences in chroot
+USE_BTRFS=$USE_BTRFS
 INSTALL_PIPEWIRE="$INSTALL_PIPEWIRE"
 INSTALL_ZSH="$INSTALL_ZSH"
 INSTALL_MONITORING="$INSTALL_MONITORING"
@@ -463,16 +633,19 @@ sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
 # Configure pacman
 sed -i 's/^#Color/Color/' /etc/pacman.conf
-sed -i 's/^#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf
+sed -i "s/^#ParallelDownloads.*/ParallelDownloads = $PARALLEL_DOWNLOADS/" /etc/pacman.conf
 
 # Enable multilib
 sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 
 # Build package list based on preferences
-PACKAGES="networkmanager efibootmgr btrfs-progs dosfstools e2fsprogs ntfs-3g \
+PACKAGES="networkmanager efibootmgr dosfstools e2fsprogs ntfs-3g \
 tar unrar unzip zip git nano vim wget curl sudo reflector \
 man-db man-pages texinfo bash-completion xdg-utils xdg-user-dirs \
 archlinux-keyring pacman-contrib pkgfile"
+
+# Add btrfs-progs only if using Btrfs
+\$USE_BTRFS && PACKAGES="\$PACKAGES btrfs-progs"
 
 # Add optional packages
 [ "\$INSTALL_PIPEWIRE" = "y" ] || [ "\$INSTALL_PIPEWIRE" = "Y" ] && \
@@ -504,6 +677,20 @@ archlinux-keyring pacman-contrib pkgfile"
 
 # Install additional packages
 pacman -Syu --noconfirm \$PACKAGES
+
+# Advanced system optimizations
+echo "Applying advanced system optimizations..."
+
+# tmpfs for /tmp and /var/tmp
+echo "tmpfs /tmp tmpfs defaults,noatime,mode=1777 0 0" >> /etc/fstab
+echo "tmpfs /var/tmp tmpfs defaults,noatime,mode=1777 0 0" >> /etc/fstab
+
+# Optimize makepkg for faster AUR builds
+sed -i "s/^#MAKEFLAGS.*/MAKEFLAGS=\"-j\$(nproc)\"/" /etc/makepkg.conf
+sed -i 's/^#COMPRESSZST.*/COMPRESSZST=(zstd -c -T0 -19 -)/' /etc/makepkg.conf
+
+# Enable paccache timer for automatic package cache cleaning
+systemctl enable paccache.timer
 
 # Generate initramfs
 mkinitcpio -P
@@ -583,18 +770,23 @@ CHROOT_EOF
     # Save final state
     save_state "INSTALLATION_COMPLETE"
     
-    echo
-    echo "✓ Base installation complete!"
-    echo "Username: $username"
-    echo "Password: [hidden]"
-    echo "Root password: [same as user]"
-    echo
-    echo "After reboot, login as Sudin and run:"
-    echo "sudo /root/ultimate-install.sh postinstall"
-    echo
-    echo "Installation state saved. You can resume with:"
-    echo "./ultimate-install.sh install --skip-to STEP_NAME"
-    echo
+    # Copy installation log to installed system
+    if [[ -f "$INSTALL_LOG" ]]; then
+        mkdir -p /mnt/var/log 2>/dev/null || true
+        cp "$INSTALL_LOG" "/root/arch-install-$(date +%Y%m%d-%H%M%S).log" 2>/dev/null || true
+    fi
+    
+    echo | tee -a "$INSTALL_LOG"
+    echo "✓ Base installation complete!" | tee -a "$INSTALL_LOG"
+    echo "Installation log saved to: $INSTALL_LOG" | tee -a "$INSTALL_LOG"
+    echo "Log also copied to: /root/arch-install-*.log (in new system)" | tee -a "$INSTALL_LOG"
+    echo | tee -a "$INSTALL_LOG"
+    echo "After reboot, login with your username and run:" | tee -a "$INSTALL_LOG"
+    echo "sudo /root/ultimate-install.sh postinstall" | tee -a "$INSTALL_LOG"
+    echo | tee -a "$INSTALL_LOG"
+    echo "Installation state saved. You can resume with:" | tee -a "$INSTALL_LOG"
+    echo "./ultimate-install.sh install --skip-to STEP_NAME" | tee -a "$INSTALL_LOG"
+    echo | tee -a "$INSTALL_LOG"
     read -p "Reboot now? (y/N): " reboot_now
     if [[ $reboot_now =~ ^[Yy]$ ]]; then
         rm -f "$STATE_FILE"  # Clean up state file
@@ -602,26 +794,29 @@ CHROOT_EOF
     fi
 
 elif [[ "$SCRIPT_PHASE" == "postinstall" ]]; then
-    echo "=== POST-INSTALLATION CONFIGURATION ==="
-    echo
+    POST_INSTALL_LOG="/var/log/arch-postinstall-$(date +%Y%m%d-%H%M%S).log"
+    echo "Post-installation log: $POST_INSTALL_LOG" | tee "$POST_INSTALL_LOG"
+    
+    echo "=== POST-INSTALLATION CONFIGURATION ===" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
     
     POST_STATE_FILE="/tmp/arch-postinstall-state"
     
     # Check if running as root
     if [[ $EUID -eq 0 ]]; then
-        echo "Don't run post-install as root! Run as: sudo /root/ultimate-install.sh postinstall"
+        echo "Don't run post-install as root! Run as: sudo /root/ultimate-install.sh postinstall" | tee -a "$POST_INSTALL_LOG"
         exit 1
     fi
     
     USERNAME=$(whoami)
-    echo "Running post-install setup for user: $USERNAME"
+    echo "Running post-install setup for user: $USERNAME" | tee -a "$POST_INSTALL_LOG"
     
     # Load installation preferences
     if [[ -f /root/install-preferences ]]; then
         source /root/install-preferences
-        echo "✓ Loaded installation preferences"
+        echo "✓ Loaded installation preferences" | tee -a "$POST_INSTALL_LOG"
     else
-        echo "⚠ No installation preferences found, using defaults"
+        echo "⚠ No installation preferences found, using defaults" | tee -a "$POST_INSTALL_LOG"
         INSTALL_KERNEL_OPTS="y"
         INSTALL_OMZ="y"
         INSTALL_GRAPHICS="y"
@@ -629,12 +824,12 @@ elif [[ "$SCRIPT_PHASE" == "postinstall" ]]; then
     
     # Restore previous state if exists
     if [[ -f /root/install-state.backup ]]; then
-        echo "Previous installation state found - main installation was successful"
+        echo "Previous installation state found - main installation was successful" | tee -a "$POST_INSTALL_LOG"
     fi
     
     # Check for saved WiFi credentials
     if [[ -f /root/wifi-credentials ]]; then
-        echo "✓ Found saved WiFi credentials from installation"
+        echo "✓ Found saved WiFi credentials from installation" | tee -a "$POST_INSTALL_LOG"
     fi
     
     # Post-install state management
@@ -889,7 +1084,7 @@ elif [[ "$SCRIPT_PHASE" == "postinstall" ]]; then
     if grep -q "POST_FINAL=true" "$POST_STATE_FILE" 2>/dev/null; then
         echo "✓ Final configuration already completed - SKIPPING"
     else
-        echo "Final configuration..."
+        echo "Final configuration..." | tee -a "$POST_INSTALL_LOG"
         mkdir -p ~/Documents ~/Downloads ~/Pictures ~/Videos ~/Music
         
         # Only add to lp group if Bluetooth was installed
@@ -905,28 +1100,125 @@ elif [[ "$SCRIPT_PHASE" == "postinstall" ]]; then
         echo "POST_FINAL=true" >> "$POST_STATE_FILE"
     fi
     
-    echo
-    echo "=== POST-INSTALLATION COMPLETE ==="
-    echo
-    echo "System optimizations applied:"
-    echo "  • Memory management optimized"
-    echo "  • CPU governor set to performance"
-    echo "  • SSD TRIM enabled"
-    echo "  • Power management (TLP) enabled"
-    echo "  • Bluetooth configured"
-    echo "  • Firewall (UFW) enabled"
-    echo "  • 8GB zram with zstd compression"
-    echo "  • Oh My Zsh with Powerlevel10k theme"
-    echo
-    echo "After reboot:"
-    echo "  • Configure Powerlevel10k: p10k configure"
-    echo "  • Test zram: cat /proc/swaps && free -h"
-    echo "  • Test bluetooth: bluetoothctl"
-    echo "  • Test NVIDIA (if installed): nvidia-smi"
-    echo
+    # Post-installation verification
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "=== POST-INSTALLATION VERIFICATION ===" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    
+    # Check boot entries
+    if sudo bootctl list &> /dev/null; then
+        echo "✓ Boot entries valid" | tee -a "$POST_INSTALL_LOG"
+    else
+        echo "✗ Boot entries may have issues" | tee -a "$POST_INSTALL_LOG"
+    fi
+    
+    # Check network
+    if ping -c 1 archlinux.org &> /dev/null; then
+        echo "✓ Network connectivity working" | tee -a "$POST_INSTALL_LOG"
+    else
+        echo "✗ Network connectivity issues" | tee -a "$POST_INSTALL_LOG"
+    fi
+    
+    # Check sudo access
+    if sudo -n true 2>/dev/null; then
+        echo "✓ Sudo access configured" | tee -a "$POST_INSTALL_LOG"
+    else
+        echo "✓ Sudo requires password (normal)" | tee -a "$POST_INSTALL_LOG"
+    fi
+    
+    # Check services
+    SERVICES_OK=true
+    if systemctl is-active --quiet NetworkManager; then
+        echo "✓ NetworkManager running" | tee -a "$POST_INSTALL_LOG"
+    else
+        echo "✗ NetworkManager not running" | tee -a "$POST_INSTALL_LOG"
+        SERVICES_OK=false
+    fi
+    
+    if [[ $INSTALL_BLUETOOTH =~ ^[Yy]$ ]]; then
+        if systemctl is-active --quiet bluetooth; then
+            echo "✓ Bluetooth service running" | tee -a "$POST_INSTALL_LOG"
+        else
+            echo "✗ Bluetooth service not running" | tee -a "$POST_INSTALL_LOG"
+            SERVICES_OK=false
+        fi
+    fi
+    
+    if [[ $INSTALL_TLP =~ ^[Yy]$ ]]; then
+        if systemctl is-enabled --quiet tlp; then
+            echo "✓ TLP power management enabled" | tee -a "$POST_INSTALL_LOG"
+        else
+            echo "✗ TLP not enabled" | tee -a "$POST_INSTALL_LOG"
+            SERVICES_OK=false
+        fi
+    fi
+    
+    if [[ $INSTALL_FIREWALL =~ ^[Yy]$ ]]; then
+        if sudo ufw status | grep -q "Status: active"; then
+            echo "✓ UFW firewall active" | tee -a "$POST_INSTALL_LOG"
+        else
+            echo "✗ UFW firewall not active" | tee -a "$POST_INSTALL_LOG"
+            SERVICES_OK=false
+        fi
+    fi
+    
+    # Generate final report
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "=== INSTALLATION REPORT ===" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "System Information:" | tee -a "$POST_INSTALL_LOG"
+    echo "  Hostname: $(hostname)" | tee -a "$POST_INSTALL_LOG"
+    echo "  Kernel: $(uname -r)" | tee -a "$POST_INSTALL_LOG"
+    echo "  CPU: $(lscpu | grep 'Model name' | cut -d':' -f2 | xargs)" | tee -a "$POST_INSTALL_LOG"
+    echo "  RAM: $(free -h | awk '/^Mem:/{print $2}')" | tee -a "$POST_INSTALL_LOG"
+    echo "  Disk: $(df -h / | awk 'NR==2{print $2}')" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "Installed Components:" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_PIPEWIRE =~ ^[Yy]$ ]] && echo "  ✓ PipeWire audio system" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_ZSH =~ ^[Yy]$ ]] && echo "  ✓ Zsh shell" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_OMZ =~ ^[Yy]$ ]] && echo "  ✓ Oh My Zsh with Powerlevel10k" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_MONITORING =~ ^[Yy]$ ]] && echo "  ✓ System monitoring tools" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_TIMESHIFT =~ ^[Yy]$ ]] && echo "  ✓ Timeshift backup system" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_BLUETOOTH =~ ^[Yy]$ ]] && echo "  ✓ Bluetooth support" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_TLP =~ ^[Yy]$ ]] && echo "  ✓ TLP power management" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_FIREWALL =~ ^[Yy]$ ]] && echo "  ✓ UFW firewall" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_ZRAM =~ ^[Yy]$ ]] && echo "  ✓ ZRAM compressed swap" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "Optimizations Applied:" | tee -a "$POST_INSTALL_LOG"
+    echo "  ✓ tmpfs for /tmp and /var/tmp" | tee -a "$POST_INSTALL_LOG"
+    echo "  ✓ Parallel makepkg compilation" | tee -a "$POST_INSTALL_LOG"
+    echo "  ✓ ZSTD compression optimization" | tee -a "$POST_INSTALL_LOG"
+    echo "  ✓ Automatic package cache cleaning" | tee -a "$POST_INSTALL_LOG"
+    echo "  ✓ CPU governor: schedutil" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_KERNEL_OPTS =~ ^[Yy]$ ]] && echo "  ✓ Kernel optimizations applied" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_SYSCTL =~ ^[Yy]$ ]] && echo "  ✓ System memory optimizations" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    
+    if $SERVICES_OK; then
+        echo "✓ All services configured correctly!" | tee -a "$POST_INSTALL_LOG"
+    else
+        echo "⚠ Some services need attention (see above)" | tee -a "$POST_INSTALL_LOG"
+    fi
+    
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "=== POST-INSTALLATION COMPLETE ===" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "Installation logs:" | tee -a "$POST_INSTALL_LOG"
+    echo "  Main install: /root/arch-install-*.log" | tee -a "$POST_INSTALL_LOG"
+    echo "  Post-install: $POST_INSTALL_LOG" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    echo "After reboot:" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_OMZ =~ ^[Yy]$ ]] && echo "  • Configure Powerlevel10k: p10k configure" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_ZRAM =~ ^[Yy]$ ]] && echo "  • Test zram: cat /proc/swaps && free -h" | tee -a "$POST_INSTALL_LOG"
+    [[ $INSTALL_BLUETOOTH =~ ^[Yy]$ ]] && echo "  • Test bluetooth: bluetoothctl" | tee -a "$POST_INSTALL_LOG"
+    echo "  • View boot analysis: systemd-analyze blame" | tee -a "$POST_INSTALL_LOG"
+    echo "  • Check critical chain: systemd-analyze critical-chain" | tee -a "$POST_INSTALL_LOG"
+    echo | tee -a "$POST_INSTALL_LOG"
+    
     read -p "Reboot now? (y/N): " reboot_now
     if [[ $reboot_now =~ ^[Yy]$ ]]; then
         rm -f "$POST_STATE_FILE"  # Clean up state file
+        echo "Rebooting..." | tee -a "$POST_INSTALL_LOG"
         sudo reboot
     fi
     
