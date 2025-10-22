@@ -166,16 +166,11 @@ if [[ "$SCRIPT_PHASE" == "install" ]]; then
         INSTALL_OMZ="n"
         INSTALL_GRAPHICS="n"
         INSTALL_FIREWALL="n"
-        echo "✓ Minimal installation mode - all optional components will be skipped" | tee -a "$INSTALL_LOG"
+        echo "✓ Minimal installation mode - all optional components will be skipped"
     else
-        # Check if WiFi adapter exists before asking
-        if iwctl device list 2>/dev/null | grep -q "wlan"; then
-            read -p "Configure WiFi during installation? (Y/n): " INSTALL_WIFI
-            INSTALL_WIFI=${INSTALL_WIFI:-y}
-        else
-            INSTALL_WIFI="n"
-            echo "No WiFi adapter detected - skipping WiFi configuration" | tee -a "$INSTALL_LOG"
-        fi
+        # Ask individually for each component
+        read -p "Configure WiFi during installation? (Y/n): " INSTALL_WIFI
+        INSTALL_WIFI=${INSTALL_WIFI:-y}
         
         read -p "Install ZRAM (8GB compressed swap)? (Y/n): " INSTALL_ZRAM
         INSTALL_ZRAM=${INSTALL_ZRAM:-y}
@@ -222,7 +217,6 @@ if [[ "$SCRIPT_PHASE" == "install" ]]; then
     
     # Save installation preferences
     cat > /tmp/install-preferences <<EOF
-USE_BTRFS=$USE_BTRFS
 INSTALL_WIFI="$INSTALL_WIFI"
 INSTALL_ZRAM="$INSTALL_ZRAM"
 INSTALL_PIPEWIRE="$INSTALL_PIPEWIRE"
@@ -391,11 +385,7 @@ EOF
         echo "  Hostname: ArchLinux" | tee -a "$INSTALL_LOG"
         echo "  Timezone: Asia/Kathmandu" | tee -a "$INSTALL_LOG"
         echo "  Locale: en_US.UTF-8" | tee -a "$INSTALL_LOG"
-        if $USE_BTRFS; then
-            echo "  Filesystem: Btrfs with @ and @home subvolumes" | tee -a "$INSTALL_LOG"
-        else
-            echo "  Filesystem: ext4" | tee -a "$INSTALL_LOG"
-        fi
+        echo "  Filesystem: Btrfs with @ and @home subvolumes" | tee -a "$INSTALL_LOG"
         echo "  Bootloader: systemd-boot" | tee -a "$INSTALL_LOG"
         echo "  CPU Cores: $CPU_CORES" | tee -a "$INSTALL_LOG"
         echo "  Parallel Downloads: $PARALLEL_DOWNLOADS" | tee -a "$INSTALL_LOG"
@@ -457,48 +447,32 @@ EOF
     if skip_if_done "MOUNTING" "Partition mounting"; then
         # Verify mounts are still active
         if ! mountpoint -q /mnt; then
-            echo "Previous mounts lost, remounting..." | tee -a "$INSTALL_LOG"
-            if $USE_BTRFS; then
-                mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
-                mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
-            else
-                mount "$ROOT_PART" /mnt
-                mkdir -p /mnt/home
-            fi
+            echo "Previous mounts lost, remounting..."
+            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
+            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
             mount "$EFI_PART" /mnt/boot
         else
-            echo "✓ Partitions already mounted correctly" | tee -a "$INSTALL_LOG"
+            echo "✓ Partitions already mounted correctly"
         fi
     else
         # Format and mount partitions
         if mountpoint -q /mnt; then
-            echo "Partitions already mounted, unmounting first..." | tee -a "$INSTALL_LOG"
+            echo "Partitions already mounted, unmounting first..."
             umount -R /mnt || true
         fi
         
-        if $USE_BTRFS; then
-            echo "Formatting root partition as Btrfs..." | tee -a "$INSTALL_LOG"
-            mkfs.btrfs -f "$ROOT_PART" | tee -a "$INSTALL_LOG"
-            mount "$ROOT_PART" /mnt
-            
-            # Create Btrfs subvolumes
-            echo "Creating Btrfs subvolumes..." | tee -a "$INSTALL_LOG"
-            btrfs subvolume create /mnt/@
-            btrfs subvolume create /mnt/@home
-            umount /mnt
-            
-            # Mount subvolumes
-            echo "Mounting Btrfs subvolumes..." | tee -a "$INSTALL_LOG"
-            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
-            mkdir -p /mnt/{boot,home}
-            mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
-        else
-            echo "Formatting root partition as ext4..." | tee -a "$INSTALL_LOG"
-            mkfs.ext4 -F "$ROOT_PART" | tee -a "$INSTALL_LOG"
-            mount "$ROOT_PART" /mnt
-            mkdir -p /mnt/{boot,home}
-        fi
+        mkfs.btrfs -f "$ROOT_PART"
+        mount "$ROOT_PART" /mnt
         
+        # Create Btrfs subvolumes
+        btrfs subvolume create /mnt/@
+        btrfs subvolume create /mnt/@home
+        umount /mnt
+        
+        # Mount subvolumes
+        mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$ROOT_PART" /mnt
+        mkdir -p /mnt/{boot,home}
+        mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$ROOT_PART" /mnt/home
         mount "$EFI_PART" /mnt/boot
         
         save_state "MOUNTING"
@@ -509,9 +483,9 @@ EOF
     if skip_if_done "MIRRORS" "Mirror optimization"; then
         :
     else
-        echo "Optimizing mirrors (limited to 20 mirrors, this may take a few minutes)..." | tee -a "$INSTALL_LOG"
-        timeout 300 reflector --latest 20 --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || {
-            echo "Reflector timed out after 5 minutes, using existing mirrors" | tee -a "$INSTALL_LOG"
+        echo "Optimizing mirrors (this may take a few minutes)..."
+        timeout 300 reflector --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || {
+            echo "Reflector timed out after 5 minutes, using existing mirrors"
         }
         save_state "MIRRORS"
     fi
@@ -584,7 +558,6 @@ EOF
 set -euo pipefail
 
 # Load preferences in chroot
-USE_BTRFS=$USE_BTRFS
 INSTALL_PIPEWIRE="$INSTALL_PIPEWIRE"
 INSTALL_ZSH="$INSTALL_ZSH"
 INSTALL_MONITORING="$INSTALL_MONITORING"
@@ -639,13 +612,10 @@ sed -i "s/^#ParallelDownloads.*/ParallelDownloads = $PARALLEL_DOWNLOADS/" /etc/p
 sed -i '/\[multilib\]/,/Include/ s/^#//' /etc/pacman.conf
 
 # Build package list based on preferences
-PACKAGES="networkmanager efibootmgr dosfstools e2fsprogs ntfs-3g \
+PACKAGES="networkmanager efibootmgr btrfs-progs dosfstools e2fsprogs ntfs-3g \
 tar unrar unzip zip git nano vim wget curl sudo reflector \
 man-db man-pages texinfo bash-completion xdg-utils xdg-user-dirs \
 archlinux-keyring pacman-contrib pkgfile"
-
-# Add btrfs-progs only if using Btrfs
-\$USE_BTRFS && PACKAGES="\$PACKAGES btrfs-progs"
 
 # Add optional packages
 [ "\$INSTALL_PIPEWIRE" = "y" ] || [ "\$INSTALL_PIPEWIRE" = "Y" ] && \
