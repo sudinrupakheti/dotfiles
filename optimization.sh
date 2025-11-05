@@ -256,6 +256,7 @@ pacman -S --needed --noconfirm reflector
 cat > /etc/xdg/reflector/reflector.conf << 'EOFMIRROR'
 --save /etc/pacman.d/mirrorlist
 --protocol https
+--country Nepal,India,Singapore,Taiwan,Japan,Germany,United Kingdom
 --latest 20
 --sort rate
 EOFMIRROR
