@@ -1,328 +1,248 @@
 #!/bin/bash
 
-# Arch Linux System Setup Script
-# This script requires root privileges
+# Personal Arch Linux Setup Script
+# Run as root on a fresh Arch install
 
 set -e
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-echo -e "${GREEN}======================================${NC}"
-echo -e "${GREEN}Arch Linux System Setup Script${NC}"
-echo -e "${GREEN}======================================${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}  Arch Linux Personal Setup Script${NC}"
+echo -e "${BLUE}========================================${NC}"
 
-# Check if running as root
+# Check root
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}This script must be run as root${NC}" 
+   echo -e "${RED}Run as root: sudo ./setup.sh${NC}" 
    exit 1
 fi
 
+# Get the real user (not root)
+REAL_USER=${SUDO_USER:-$(logname 2>/dev/null)}
+if [[ -z "$REAL_USER" ]]; then
+    echo -e "${RED}Cannot determine user. Run with sudo.${NC}"
+    exit 1
+fi
+USER_HOME=$(eval echo ~$REAL_USER)
+
+# ============================================
 # 1. Set nano as default editor
-echo -e "\n${YELLOW}[1/5] Setting nano as default editor...${NC}"
-if ! grep -q "EDITOR=nano" /etc/environment; then
+# ============================================
+echo -e "\n${YELLOW}[1/6] Setting nano as default editor...${NC}"
+if ! grep -q "EDITOR=nano" /etc/environment 2>/dev/null; then
     echo "EDITOR=nano" >> /etc/environment
     echo "VISUAL=nano" >> /etc/environment
 fi
 export EDITOR=nano
 export VISUAL=nano
-echo -e "${GREEN}✓ Nano set as default editor${NC}"
+echo -e "${GREEN}✓ Nano configured${NC}"
 
-# 2. Add pwfeedback to sudoers
-echo -e "\n${YELLOW}[2/5] Enabling password feedback in sudo...${NC}"
-if ! grep -q "Defaults pwfeedback" /etc/sudoers; then
-    sed -i '/^Defaults/a Defaults pwfeedback' /etc/sudoers
+# ============================================
+# 2. Enable password feedback (****)
+# ============================================
+echo -e "\n${YELLOW}[2/6] Enabling password feedback...${NC}"
+SUDOERS_FILE="/etc/sudoers.d/pwfeedback"
+if [[ ! -f "$SUDOERS_FILE" ]]; then
+    echo "Defaults pwfeedback" > "$SUDOERS_FILE"
+    chmod 440 "$SUDOERS_FILE"
     echo -e "${GREEN}✓ Password feedback enabled${NC}"
 else
-    echo -e "${GREEN}✓ Password feedback already enabled${NC}"
+    echo -e "${GREEN}✓ Already enabled${NC}"
 fi
 
+# ============================================
 # 3. Install yay
-echo -e "\n${YELLOW}[3/5] Installing yay AUR helper...${NC}"
+# ============================================
+echo -e "\n${YELLOW}[3/6] Installing yay AUR helper...${NC}"
 if command -v yay &> /dev/null; then
-    echo -e "${GREEN}✓ Yay is already installed${NC}"
+    echo -e "${GREEN}✓ Yay already installed${NC}"
 else
-    # Install dependencies
     pacman -S --needed --noconfirm git base-devel
-    
-    # Get the sudo user (not root)
-    SUDO_USER_HOME=$(eval echo ~${SUDO_USER})
-    
-    # Clone and install yay as the sudo user
     cd /tmp
-    sudo -u $SUDO_USER git clone https://aur.archlinux.org/yay.git
-    cd yay
-    sudo -u $SUDO_USER makepkg -si --noconfirm
-    cd ..
-    rm -rf yay
-    echo -e "${GREEN}✓ Yay installed successfully${NC}"
+    sudo -u $REAL_USER git clone https://aur.archlinux.org/yay-bin.git
+    cd yay-bin
+    sudo -u $REAL_USER makepkg -si --noconfirm
+    cd /tmp
+    rm -rf yay-bin
+    echo -e "${GREEN}✓ Yay installed${NC}"
 fi
 
+# ============================================
 # 4. Install and configure TLP
-echo -e "\n${YELLOW}[4/5] Installing and configuring TLP...${NC}"
-pacman -S --needed --noconfirm tlp tlp-rdw
+# ============================================
+echo -e "\n${YELLOW}[4/6] Setting up TLP for battery optimization...${NC}"
+pacman -S --needed --noconfirm tlp
 
-# Backup original config
-if [[ ! -f /etc/tlp.conf.bak ]]; then
-    cp /etc/tlp.conf /etc/tlp.conf.bak
-fi
+# Create TLP config focused on battery saving
+mkdir -p /etc/tlp.d
+cat > /etc/tlp.d/00-battery-optimization.conf << 'EOF'
+# Battery-focused TLP configuration
 
-# Configure TLP for power saving on battery and balanced when plugged in
-cat > /etc/tlp.conf << 'EOF'
-# TLP Configuration - Power Saving on Battery, Balanced on AC
-
-# CPU Scaling Governor
+# CPU - Power saving on battery, balanced on AC
 CPU_SCALING_GOVERNOR_ON_AC=schedutil
 CPU_SCALING_GOVERNOR_ON_BAT=powersave
 
-# CPU Energy/Performance Policy
 CPU_ENERGY_PERF_POLICY_ON_AC=balance_performance
 CPU_ENERGY_PERF_POLICY_ON_BAT=power
 
-# CPU Boost
+# Disable turbo boost on battery to save power
 CPU_BOOST_ON_AC=1
 CPU_BOOST_ON_BAT=0
 
-# CPU Min/Max Frequency
-CPU_SCALING_MIN_FREQ_ON_AC=800000
-CPU_SCALING_MAX_FREQ_ON_AC=9999999
-CPU_SCALING_MIN_FREQ_ON_BAT=800000
-CPU_SCALING_MAX_FREQ_ON_BAT=2000000
-
-# Platform Profile (if supported)
+# Platform profiles (if supported by hardware)
 PLATFORM_PROFILE_ON_AC=balanced
 PLATFORM_PROFILE_ON_BAT=low-power
 
-# Disk devices
-DISK_DEVICES="nvme0n1 sda"
-DISK_APM_LEVEL_ON_AC="254 254"
-DISK_APM_LEVEL_ON_BAT="128 128"
-
-# SATA Link Power Management
+# Aggressive power saving for disks on battery
 SATA_LINKPWR_ON_AC=med_power_with_dipm
 SATA_LINKPWR_ON_BAT=min_power
 
-# PCI Express Active State Power Management
+# PCIe power management
 PCIE_ASPM_ON_AC=default
 PCIE_ASPM_ON_BAT=powersupersave
 
-# Runtime Power Management
+# Enable runtime PM for all devices on battery
 RUNTIME_PM_ON_AC=on
 RUNTIME_PM_ON_BAT=auto
 
-# WiFi Power Saving
+# WiFi power saving on battery
 WIFI_PWR_ON_AC=off
 WIFI_PWR_ON_BAT=on
 
-# Sound Power Saving
+# Enable audio power saving on battery
 SOUND_POWER_SAVE_ON_AC=0
 SOUND_POWER_SAVE_ON_BAT=1
 
-# USB Autosuspend
+# USB autosuspend
 USB_AUTOSUSPEND=1
-USB_EXCLUDE_BTUSB=0
-USB_EXCLUDE_PHONE=0
-USB_EXCLUDE_PRINTER=1
-USB_EXCLUDE_WWAN=0
-
-# Battery thresholds (for ThinkPads - adjust if needed)
-START_CHARGE_THRESH_BAT0=75
-STOP_CHARGE_THRESH_BAT0=80
-START_CHARGE_THRESH_BAT1=75
-STOP_CHARGE_THRESH_BAT1=80
 EOF
 
-# Enable and start TLP
+# Enable TLP
 systemctl enable tlp.service
 systemctl start tlp.service
 systemctl mask systemd-rfkill.service systemd-rfkill.socket 2>/dev/null || true
 
-echo -e "${GREEN}✓ TLP installed and configured${NC}"
+echo -e "${GREEN}✓ TLP configured for battery optimization${NC}"
 
+# ============================================
 # 5. Optimize pacman
-echo -e "\n${YELLOW}[5/5] Optimizing pacman...${NC}"
+# ============================================
+echo -e "\n${YELLOW}[5/6] Optimizing pacman...${NC}"
 
-# Backup original pacman.conf
-if [[ ! -f /etc/pacman.conf.bak ]]; then
-    cp /etc/pacman.conf /etc/pacman.conf.bak
+# Backup if not already done
+[[ ! -f /etc/pacman.conf.bak ]] && cp /etc/pacman.conf /etc/pacman.conf.bak
+
+# Enable color and parallel downloads
+sed -i 's/#Color/Color/' /etc/pacman.conf
+sed -i 's/#ParallelDownloads.*/ParallelDownloads = 10/' /etc/pacman.conf
+
+# Add eye candy (pacman eating dots)
+if ! grep -q "ILoveCandy" /etc/pacman.conf; then
+    sed -i '/^ParallelDownloads/a ILoveCandy' /etc/pacman.conf
 fi
 
-# Enable parallel downloads and color
-sed -i 's/#Color/Color/' /etc/pacman.conf
-sed -i 's/#ParallelDownloads = 5/ParallelDownloads = 10/' /etc/pacman.conf
-sed -i '/^ParallelDownloads/a ILoveCandy' /etc/pacman.conf
-
-# Enable multilib if not enabled (for 64-bit systems)
+# Enable multilib (for 32-bit support)
 if ! grep -q "^\[multilib\]" /etc/pacman.conf; then
     echo -e "\n[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
 fi
 
-# Update pacman database
 pacman -Sy
 
 echo -e "${GREEN}✓ Pacman optimized${NC}"
 
-# Summary
-echo -e "\n${GREEN}======================================${NC}"
-echo -e "${GREEN}Setup Complete!${NC}"
-echo -e "${GREEN}======================================${NC}"
-echo -e "✓ Nano set as default editor"
-echo -e "✓ Password feedback enabled in sudo"
-echo -e "✓ Yay AUR helper installed"
-echo -e "✓ TLP installed and configured"
-echo -e "✓ Pacman optimized"
-echo -e "\n${YELLOW}Note: You may need to logout and login again for all changes to take effect.${NC}"
-echo -e "${YELLOW}TLP status can be checked with: tlp-stat -s${NC}"
+# ============================================
+# 6. Performance optimizations
+# ============================================
+echo -e "\n${YELLOW}[6/6] Applying performance optimizations...${NC}"
 
-# Additional QoL improvements
-echo -e "\n${YELLOW}[BONUS] Applying additional QoL improvements...${NC}"
-
-# 6. Enable TRIM for SSDs
-echo -e "\n${YELLOW}Enabling weekly TRIM for SSDs...${NC}"
+# Enable TRIM for SSDs
 systemctl enable fstrim.timer
-echo -e "${GREEN}✓ TRIM timer enabled${NC}"
 
-# 7. Reduce swappiness for better performance
-echo -e "\n${YELLOW}Optimizing swappiness...${NC}"
-if ! grep -q "vm.swappiness" /etc/sysctl.d/99-swappiness.conf 2>/dev/null; then
-    echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
-    sysctl -p /etc/sysctl.d/99-swappiness.conf
-    echo -e "${GREEN}✓ Swappiness set to 10${NC}"
-else
-    echo -e "${GREEN}✓ Swappiness already configured${NC}"
-fi
+# Reduce swappiness (less swapping = better performance)
+echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
+sysctl -p /etc/sysctl.d/99-swappiness.conf
 
-# 8. Improve I/O scheduler
-echo -e "\n${YELLOW}Setting optimal I/O schedulers...${NC}"
-cat > /etc/udev/rules.d/60-ioschedulers.rules << 'EOFRULES'
-# Set deadline scheduler for non-rotating disks (SSDs, NVMe)
-ACTION=="add|change", KERNEL=="sd[a-z]*|mmcblk[0-9]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
-# Set BFQ scheduler for rotating disks (HDDs)
-ACTION=="add|change", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
-# Set none scheduler for NVMe (already optimal)
-ACTION=="add|change", KERNEL=="nvme[0-9]*", ATTR{queue/scheduler}="none"
-EOFRULES
-echo -e "${GREEN}✓ I/O schedulers configured${NC}"
-
-# 9. Improve system responsiveness
-echo -e "\n${YELLOW}Improving system responsiveness...${NC}"
-cat > /etc/sysctl.d/99-performance.conf << 'EOFPERF'
-# Increase file watchers
+# System responsiveness improvements
+cat > /etc/sysctl.d/99-performance.conf << 'EOF'
+# Increase file watchers (for IDEs, file managers)
 fs.inotify.max_user_watches=524288
-# Improve cache pressure
+
+# Better cache management
 vm.vfs_cache_pressure=50
-# Increase max map count (helps with games and some apps)
+
+# Increase max map count (helps with games, browsers)
 vm.max_map_count=2147483642
-EOFPERF
+EOF
 sysctl -p /etc/sysctl.d/99-performance.conf
-echo -e "${GREEN}✓ System responsiveness improved${NC}"
 
-# 10. Add useful bash aliases
-echo -e "\n${YELLOW}Adding useful bash aliases...${NC}"
-if [[ -n "$SUDO_USER" ]]; then
-    SUDO_USER_HOME=$(eval echo ~${SUDO_USER})
-    BASHRC="$SUDO_USER_HOME/.bashrc"
-else
-    BASHRC="/root/.bashrc"
-fi
+# Optimize I/O schedulers
+cat > /etc/udev/rules.d/60-ioschedulers.rules << 'EOF'
+# Optimal schedulers for different drive types
+ACTION=="add|change", KERNEL=="sd[a-z]*|mmcblk[0-9]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
+ACTION=="add|change", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+ACTION=="add|change", KERNEL=="nvme[0-9]*", ATTR{queue/scheduler}="none"
+EOF
 
-if ! grep -q "# Custom Aliases" "$BASHRC" 2>/dev/null; then
-    cat >> "$BASHRC" << 'EOFALIASES'
-
-# Custom Aliases
-alias update='sudo pacman -Syu'
-alias install='sudo pacman -S'
-alias remove='sudo pacman -Rns'
-alias search='pacman -Ss'
-alias clean='sudo pacman -Sc && yay -Sc'
-alias orphans='sudo pacman -Rns $(pacman -Qtdq)'
-alias ll='ls -lah --color=auto'
-alias grep='grep --color=auto'
-alias ..='cd ..'
-alias ...='cd ../..'
-alias mirror='sudo reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist'
-EOFALIASES
-    echo -e "${GREEN}✓ Bash aliases added${NC}"
-else
-    echo -e "${GREEN}✓ Bash aliases already exist${NC}"
-fi
-
-# 11. Install reflector for automatic mirror updates
-echo -e "\n${YELLOW}Setting up automatic mirror updates...${NC}"
-pacman -S --needed --noconfirm reflector
-cat > /etc/xdg/reflector/reflector.conf << 'EOFMIRROR'
---save /etc/pacman.d/mirrorlist
---protocol https
---country Nepal,India,Singapore,Taiwan,Japan,Germany,United Kingdom
---latest 20
---sort rate
-EOFMIRROR
-systemctl enable reflector.timer
-echo -e "${GREEN}✓ Reflector configured${NC}"
-
-# 12. Enable systemd-oomd (Out of Memory daemon)
-echo -e "\n${YELLOW}Enabling OOM protection...${NC}"
-systemctl enable --now systemd-oomd
-echo -e "${GREEN}✓ OOM protection enabled${NC}"
-
-# 13. Optimize makepkg for faster AUR builds
-echo -e "\n${YELLOW}Optimizing makepkg...${NC}"
+# Optimize makepkg for faster AUR builds
 if [[ ! -f /etc/makepkg.conf.bak ]]; then
     cp /etc/makepkg.conf /etc/makepkg.conf.bak
 fi
-# Use all cores for compilation
 CORES=$(nproc)
 sed -i "s/#MAKEFLAGS=\"-j2\"/MAKEFLAGS=\"-j$CORES\"/" /etc/makepkg.conf
-# Enable compression
-sed -i 's/COMPRESSGZ=(gzip -c -f -n)/COMPRESSGZ=(pigz -c -f -n)/' /etc/makepkg.conf
-sed -i 's/COMPRESSBZ2=(bzip2 -c -f)/COMPRESSBZ2=(pbzip2 -c -f)/' /etc/makepkg.conf
-sed -i 's/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z - --threads=0)/' /etc/makepkg.conf
-echo -e "${GREEN}✓ Makepkg optimized for $CORES cores${NC}"
+sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z - --threads=0)/" /etc/makepkg.conf
 
-# 14. Set up paccache for automatic cache cleanup
-echo -e "\n${YELLOW}Setting up automatic pacman cache cleanup...${NC}"
-systemctl enable paccache.timer
-echo -e "${GREEN}✓ Paccache timer enabled (keeps last 3 versions)${NC}"
+# Enable systemd-oomd (prevents system freeze on low memory)
+systemctl enable --now systemd-oomd
 
-# 15. Disable watchdog timers for faster boot
-echo -e "\n${YELLOW}Disabling watchdog timers for faster boot...${NC}"
-if [[ -f /etc/kernel/cmdline ]]; then
-    if ! grep -q "nowatchdog" /etc/kernel/cmdline; then
-        echo "$(cat /etc/kernel/cmdline) nowatchdog mitigations=off" > /etc/kernel/cmdline
-        bootctl update 2>/dev/null || true
-        echo -e "${GREEN}✓ Watchdog timers disabled${NC}"
-    else
-        echo -e "${GREEN}✓ Watchdog timers already disabled${NC}"
-    fi
-else
-    echo -e "${YELLOW}⚠ /etc/kernel/cmdline not found, skipping${NC}"
-fi
-
-# 16. Optimize systemd journal for speed and size
-echo -e "\n${YELLOW}Optimizing systemd journal for speed and size...${NC}"
+# Optimize systemd journal size
 mkdir -p /etc/systemd/journald.conf.d
-cat > /etc/systemd/journald.conf.d/size-limit.conf << 'EOFJOURNAL'
+cat > /etc/systemd/journald.conf.d/size-limit.conf << 'EOF'
 [Journal]
 SystemMaxUse=200M
 RuntimeMaxUse=50M
 Compress=yes
-EOFJOURNAL
+EOF
 systemctl restart systemd-journald
-echo -e "${GREEN}✓ Journal compression enabled and size limited${NC}"
 
-# Final summary
-echo -e "\n${GREEN}======================================${NC}"
-echo -e "${GREEN}Additional Optimizations Complete!${NC}"
-echo -e "${GREEN}======================================${NC}"
-echo -e "✓ TRIM enabled for SSDs"
-echo -e "✓ Swappiness reduced to 10"
-echo -e "✓ I/O schedulers optimized"
-echo -e "✓ System responsiveness improved"
-echo -e "✓ Useful bash aliases added"
-echo -e "✓ Automatic mirror updates (reflector)"
-echo -e "✓ OOM protection enabled"
-echo -e "✓ Makepkg optimized for parallel builds"
-echo -e "✓ Automatic cache cleanup enabled"
+# Add useful aliases
+if ! grep -q "# Personal Aliases" "$USER_HOME/.bashrc" 2>/dev/null; then
+    cat >> "$USER_HOME/.bashrc" << 'EOF'
+
+# Personal Aliases
+alias update='sudo pacman -Syu && yay -Syu'
+alias install='sudo pacman -S'
+alias remove='sudo pacman -Rns'
+alias search='pacman -Ss'
+alias clean='sudo pacman -Sc && yay -Sc'
+alias ll='ls -lah'
+alias ..='cd ..'
+alias ...='cd ../..'
+EOF
+    chown $REAL_USER:$REAL_USER "$USER_HOME/.bashrc"
+    echo -e "${GREEN}✓ Useful aliases added to .bashrc${NC}"
+fi
+
+echo -e "${GREEN}✓ Performance optimizations applied${NC}"
+
+# ============================================
+# Summary
+# ============================================
+echo -e "\n${BLUE}========================================${NC}"
+echo -e "${GREEN}✓ Setup Complete!${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo ""
+echo -e "${GREEN}✓${NC} Nano is default editor"
+echo -e "${GREEN}✓${NC} Password feedback enabled (****)"
+echo -e "${GREEN}✓${NC} Yay AUR helper installed"
+echo -e "${GREEN}✓${NC} TLP optimized for battery life"
+echo -e "${GREEN}✓${NC} Pacman optimized (parallel downloads)"
+echo -e "${GREEN}✓${NC} Performance improvements applied"
+echo ""
+echo -e "${YELLOW}→ Reboot recommended for all changes to take effect${NC}"
+echo -e "${YELLOW}→ Check TLP status: tlp-stat -s${NC}"
+echo ""
