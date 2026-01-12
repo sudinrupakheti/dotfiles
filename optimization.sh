@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Personal Arch Linux Setup Script
-# Run as root on a fresh Arch install
-
 set -e
 
 # Colors
@@ -63,6 +60,10 @@ if command -v yay &> /dev/null; then
     echo -e "${GREEN}✓ Yay already installed${NC}"
 else
     pacman -S --needed --noconfirm git base-devel
+    
+    # Clean up any previous failed attempts
+    rm -rf /tmp/yay-bin
+    
     cd /tmp
     sudo -u $REAL_USER git clone https://aur.archlinux.org/yay-bin.git
     cd yay-bin
@@ -76,6 +77,11 @@ fi
 # 4. Install and configure TLP
 # ============================================
 echo -e "\n${YELLOW}[4/6] Setting up TLP for battery optimization...${NC}"
+
+# Remove conflicting power management tools
+echo -e "Removing conflicting power management tools..."
+pacman -R --noconfirm thermald laptop-mode-tools 2>/dev/null || true
+
 pacman -S --needed --noconfirm tlp
 
 # Create TLP config focused on battery saving
@@ -122,9 +128,9 @@ SOUND_POWER_SAVE_ON_BAT=1
 USB_AUTOSUSPEND=1
 EOF
 
-# Enable TLP
-systemctl enable tlp.service
-systemctl start tlp.service
+# Enable TLP with error handling
+systemctl enable tlp.service 2>/dev/null || true
+systemctl start tlp.service 2>/dev/null || true
 systemctl mask systemd-rfkill.service systemd-rfkill.socket 2>/dev/null || true
 
 echo -e "${GREEN}✓ TLP configured for battery optimization${NC}"
@@ -135,7 +141,10 @@ echo -e "${GREEN}✓ TLP configured for battery optimization${NC}"
 echo -e "\n${YELLOW}[5/6] Optimizing pacman...${NC}"
 
 # Backup if not already done
-[[ ! -f /etc/pacman.conf.bak ]] && cp /etc/pacman.conf /etc/pacman.conf.bak
+if [[ ! -f /etc/pacman.conf.bak ]]; then
+    cp /etc/pacman.conf /etc/pacman.conf.bak
+    echo -e "Created backup: /etc/pacman.conf.bak"
+fi
 
 # Enable color and parallel downloads
 sed -i 's/#Color/Color/' /etc/pacman.conf
@@ -161,11 +170,11 @@ echo -e "${GREEN}✓ Pacman optimized${NC}"
 echo -e "\n${YELLOW}[6/6] Applying performance optimizations...${NC}"
 
 # Enable TRIM for SSDs
-systemctl enable fstrim.timer
+systemctl enable fstrim.timer 2>/dev/null || true
 
 # Reduce swappiness (less swapping = better performance)
 echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
-sysctl -p /etc/sysctl.d/99-swappiness.conf
+sysctl -p /etc/sysctl.d/99-swappiness.conf 2>/dev/null || true
 
 # System responsiveness improvements
 cat > /etc/sysctl.d/99-performance.conf << 'EOF'
@@ -178,7 +187,7 @@ vm.vfs_cache_pressure=50
 # Increase max map count (helps with games, browsers)
 vm.max_map_count=2147483642
 EOF
-sysctl -p /etc/sysctl.d/99-performance.conf
+sysctl -p /etc/sysctl.d/99-performance.conf 2>/dev/null || true
 
 # Optimize I/O schedulers
 cat > /etc/udev/rules.d/60-ioschedulers.rules << 'EOF'
@@ -191,13 +200,20 @@ EOF
 # Optimize makepkg for faster AUR builds
 if [[ ! -f /etc/makepkg.conf.bak ]]; then
     cp /etc/makepkg.conf /etc/makepkg.conf.bak
+    echo -e "Created backup: /etc/makepkg.conf.bak"
 fi
+
 CORES=$(nproc)
 sed -i "s/#MAKEFLAGS=\"-j2\"/MAKEFLAGS=\"-j$CORES\"/" /etc/makepkg.conf
-sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z - --threads=0)/" /etc/makepkg.conf
+sed -i "s/^#MAKEFLAGS=.*/MAKEFLAGS=\"-j$CORES\"/" /etc/makepkg.conf
+
+# Try to optimize compression (handle different formats)
+if grep -q "COMPRESSXZ=(xz -c -z -)" /etc/makepkg.conf; then
+    sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z - --threads=0)/" /etc/makepkg.conf
+fi
 
 # Enable systemd-oomd (prevents system freeze on low memory)
-systemctl enable --now systemd-oomd
+systemctl enable --now systemd-oomd 2>/dev/null || true
 
 # Optimize systemd journal size
 mkdir -p /etc/systemd/journald.conf.d
@@ -207,7 +223,7 @@ SystemMaxUse=200M
 RuntimeMaxUse=50M
 Compress=yes
 EOF
-systemctl restart systemd-journald
+systemctl restart systemd-journald 2>/dev/null || true
 
 # Add useful aliases
 if ! grep -q "# Personal Aliases" "$USER_HOME/.bashrc" 2>/dev/null; then
@@ -230,6 +246,22 @@ fi
 echo -e "${GREEN}✓ Performance optimizations applied${NC}"
 
 # ============================================
+# Cleanup backups (optional)
+# ============================================
+echo -e "\n${YELLOW}Backup files created:${NC}"
+echo -e "  - /etc/pacman.conf.bak"
+echo -e "  - /etc/makepkg.conf.bak"
+echo ""
+read -p "Remove backup files? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    rm -f /etc/pacman.conf.bak /etc/makepkg.conf.bak
+    echo -e "${GREEN}✓ Backup files removed${NC}"
+else
+    echo -e "${BLUE}→ Backup files kept for safety${NC}"
+fi
+
+# ============================================
 # Summary
 # ============================================
 echo -e "\n${BLUE}========================================${NC}"
@@ -245,4 +277,5 @@ echo -e "${GREEN}✓${NC} Performance improvements applied"
 echo ""
 echo -e "${YELLOW}→ Reboot recommended for all changes to take effect${NC}"
 echo -e "${YELLOW}→ Check TLP status: tlp-stat -s${NC}"
+echo -e "${YELLOW}→ Test new aliases: source ~/.bashrc${NC}"
 echo ""
